@@ -176,9 +176,9 @@ void loop() {
   power = voltageRMS * currentRMS;
 
   powerMEDIAMOVIL = (power + powerKm1 + powerKm2 + powerKm3)/4;
-  powerKm1 = power;
-  powerKm2 = powerKm1;
   powerKm3 = powerKm2;
+  powerKm2 = powerKm1;
+  powerKm1 = power;
 
   int power1 = powerMEDIAMOVIL;
 
