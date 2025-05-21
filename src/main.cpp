@@ -19,28 +19,48 @@ bool inicioCom = true;
 uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 const int sensorPin = 34;                   // Pin ADC donde se conecta la salida del ACS712
-
 const int Interruptor = 14;   
 const int rele = 25 ;  
+const int pin = 32 ;
 
 const float voltageRMS = 220.0;             // Voltaje RMS de la red eléctrica
 const float sensitivity = 0.069 ;           // Sensibilidad del ACS712 (100 mV/A para el modelo de 20A)
-const float adcResolution = 3.3 / 4096.0;   // Resolución del ADC del ESP32 (3.3V referencia / 4095 pasos)
-const float voltageOffset = 1.59;           // Voltaje de offset del sensor después del divisor resistivo (1.65V)
+const float adcResolution = 3.3 / 4095.0;   // Resolución del ADC del ESP32 (3.3V referencia / 4095 pasos)
+float voltageOffset = 1.66;                 // Voltaje de offset del sensor después del divisor resistivo
 
-const int numSamples = 8000;                // Número de muestras totales 
+const int numSamples = 6000;                // Número de muestras totales
 
+// filtro media movil para potencia
 float power = 0;
 float powerKm1 = 0;
 float powerKm2 = 0;
 float powerKm3 = 0;
 float powerMEDIAMOVIL = 0;
+int power1 = 0;
 
+//funcion de calibracion
+void calibrarADC(){
+  int sensor = 0;
+  float voltage = 0, voltageSUM = 0;
+  Serial.println("Calibrando...");
+  for (int i = 0; i < numSamples; i++) {
+    sensor = analogRead(sensorPin);             // Leer valor del ADC
+    voltage = sensor * adcResolution;           // Convertir a voltaje
+    voltageSUM += voltage;                      // sumatoria de voltajes
+  }
+  voltageOffset = voltageSUM / numSamples;           // valor promedio
+  Serial.print("Voltaje Offset: ");
+  Serial.print(voltageOffset, 5);
+  delay(1000);
+}
+
+// registrar peers
 void agregarPeer(const uint8_t *mac) {
   if (peerCount >= MAX_PEERS) return;  
 
   for (int i = 0; i < peerCount; i++) {
     if (memcmp(peers[i], mac, 6) == 0) return;  // Ya está registrado
+    Serial.println("El peer ya se encuentra registrado");
   }
 
   memcpy(peers[peerCount], mac, 6);
@@ -55,7 +75,7 @@ void agregarPeer(const uint8_t *mac) {
   else Serial.println("Error al agregar peer");
 }
 
-// Función para enviar información a todos los peers
+// enviar a todos los peers
 void enviarInformacion() {
   if(inicioCom){
     esp_now_send(broadcastAddress, (uint8_t *)&energia, sizeof(energia));
@@ -82,7 +102,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
       agregarPeer(mac);  // REGISTRAR MAESTRO COMO PEER
 
       // Actualizar información
-      energia.consumoActual = random(10, 50) / 10.0;
+      energia.consumoActual = power1;
       energia.prioridad = prioridadNodo;
 
       // Ajustar estado de carga
@@ -91,7 +111,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
       else cargaEncendida = true;
 
       Serial.println(cargaEncendida ? "Carga encendida" : "Carga apagada");
-      enviarInformacion();  
+        
   }
   else { // MENSAJE DE OTRO ESCLAVO
       EnergiaData mensaje;
@@ -106,8 +126,8 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
   }
 }
 
-/*
-// Callback de envío
+
+/* // Callback de envío
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   Serial.printf("Envío a %02X:%02X:%02X:%02X:%02X:%02X - %s\n",
                 mac_addr[0], mac_addr[1], mac_addr[2],
@@ -123,6 +143,9 @@ void setup() {
 
   pinMode(Interruptor, INPUT);              // Configurar entrada
   pinMode(rele, OUTPUT);                    // Configurar salida
+  pinMode(pin, OUTPUT);
+
+  digitalWrite(pin, LOW);
 
   WiFi.mode(WIFI_STA);
 
@@ -142,10 +165,13 @@ void setup() {
     Serial.println("Error al agregar el peer de broadcast");
   }
 
+  calibrarADC();
 }
 
+int cont = 0;
+
 void loop() {
- 
+  
   int estado = digitalRead(Interruptor);                                          // activar circulacion en la carga
   (estado == HIGH) ? digitalWrite(rele, LOW) : digitalWrite(rele, HIGH);
   
@@ -153,14 +179,20 @@ void loop() {
   int sensorValue = 0;
   float voltage = 0;
   float voltageDifference = 0;
+  float rawSamples[numSamples];
 
+  for (int i = 0; i < numSamples; i++) {
+    digitalWrite(pin, HIGH);  
+    rawSamples[i] = analogRead(sensorPin);
+    digitalWrite(pin, LOW); 
+  }
+
+  // Procesamiento de datos fuera del bucle de adquisición
   if (estado == HIGH){
     for (int i = 0; i < numSamples; i++) {
-      sensorValue = analogRead(sensorPin);                                        // Leer valor del ADC
-      voltage = sensorValue * adcResolution;                                      // Convertir a voltaje
-      //Serial.println(voltage);                                                  // calibracion
+      voltage = rawSamples[i] * adcResolution;                                      // Convertir a voltaje
       voltageDifference = voltage - voltageOffset;                                // Restar el offset
-      voltageDifference = (voltageDifference <= 0.015) ?  0 : voltageDifference;  // ventana de histeresis
+      //voltageDifference = (voltageDifference <= 0.025) ?  0 : voltageDifference;   // ventana de histeresis
       sumSquared += voltageDifference * voltageDifference;                        // Acumular el cuadrado de la diferencia
     }
   }
@@ -180,7 +212,7 @@ void loop() {
   powerKm2 = powerKm1;
   powerKm1 = power;
 
-  int power1 = powerMEDIAMOVIL;
+  power1 = powerMEDIAMOVIL;
 
   // Mostrar los resultados en el monitor serie
   Serial.print("\n\n\nVoltaje RMS: ");
@@ -191,4 +223,12 @@ void loop() {
   Serial.print(power1);
   Serial.print(" W");
 
+  if(cont == 3){
+    enviarInformacion();
+    cont = 0;
+  }
+
+  cont++;
+
+  delay(500);
 }
