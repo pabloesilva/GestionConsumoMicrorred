@@ -21,12 +21,18 @@ uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 const int sensorPin = 34;                   // Pin ADC donde se conecta la salida del ACS712
 
 const int Interruptor = 14;   
-const int rele = 25 ;  
+const int rele = 26;  
+const int ledRojo1 = 23;
+const int ledRojo2 = 22;
+const int ledAmarillo1 = 21;
+const int ledAmarillo2 = 19;
+const int ledVerde1 = 18;
+const int ledVerde2 = 5;
 
 const float voltageRMS = 220.0;             // Voltaje RMS de la red eléctrica
 const float sensitivity = 0.069 ;           // Sensibilidad del ACS712 (100 mV/A para el modelo de 20A)
 const float adcResolution = 3.3 / 4096.0;   // Resolución del ADC del ESP32 (3.3V referencia / 4095 pasos)
-const float voltageOffset = 1.59;           // Voltaje de offset del sensor después del divisor resistivo (1.65V)
+const float voltageOffset = 1.22;           // Voltaje de offset del sensor después del divisor resistivo (1.65V)
 
 const int numSamples = 8000;                // Número de muestras totales 
 
@@ -123,7 +129,13 @@ void setup() {
 
   pinMode(Interruptor, INPUT);              // Configurar entrada
   pinMode(rele, OUTPUT);                    // Configurar salida
-
+  pinMode(ledRojo1, OUTPUT); 
+  pinMode(ledRojo2, OUTPUT); 
+  pinMode(ledAmarillo1, OUTPUT); 
+  pinMode(ledAmarillo2, OUTPUT); 
+  pinMode(ledVerde1, OUTPUT);
+  pinMode(ledVerde2, OUTPUT);
+  
   WiFi.mode(WIFI_STA);
 
   if (esp_now_init() != ESP_OK) {
@@ -142,12 +154,47 @@ void setup() {
     Serial.println("Error al agregar el peer de broadcast");
   }
 
+  
+  digitalWrite(ledRojo1, HIGH);
+  delay(300);
+  digitalWrite(ledRojo2, HIGH);
+  delay(300);
+  digitalWrite(ledAmarillo1, HIGH);
+  delay(300);
+  digitalWrite(ledAmarillo2, HIGH);
+  delay(300);
+  digitalWrite(ledVerde1, HIGH);
+  delay(300);
+  digitalWrite(ledVerde2, HIGH);
+  delay(300);
+
+  delay(1000);
+  digitalWrite(ledVerde2, LOW);
+  delay(300);
+  digitalWrite(ledVerde1, LOW);
+  delay(300);
+  digitalWrite(ledAmarillo2, LOW);
+  delay(300);
+  digitalWrite(ledAmarillo1, LOW);
+  delay(300);
+  digitalWrite(ledRojo2, LOW);
+  delay(300);
+  digitalWrite(ledRojo1, LOW);
+  
+  
+  digitalWrite(ledAmarillo2, LOW);
+  digitalWrite(ledRojo1, LOW);
+  digitalWrite(ledRojo2, LOW);
+  
+  digitalWrite(ledAmarillo1, LOW);
+  
+
 }
 
 void loop() {
  
   int estado = digitalRead(Interruptor);                                          // activar circulacion en la carga
-  (estado == HIGH) ? digitalWrite(rele, LOW) : digitalWrite(rele, HIGH);
+  (estado == HIGH) ? digitalWrite(rele, HIGH) : digitalWrite(rele, LOW);
   
   float sumSquared = 0;
   int sensorValue = 0;
@@ -155,12 +202,14 @@ void loop() {
   float voltageDifference = 0;
 
   if (estado == HIGH){
+    Serial.println(estado);
+    delay(1000);
     for (int i = 0; i < numSamples; i++) {
       sensorValue = analogRead(sensorPin);                                        // Leer valor del ADC
       voltage = sensorValue * adcResolution;                                      // Convertir a voltaje
-      //Serial.println(voltage);                                                  // calibracion
+      Serial.println(voltage);                                                  // calibracion
       voltageDifference = voltage - voltageOffset;                                // Restar el offset
-      voltageDifference = (voltageDifference <= 0.015) ?  0 : voltageDifference;  // ventana de histeresis
+      //voltageDifference = (voltageDifference <= 0.015) ?  0 : voltageDifference;  // ventana de histeresis
       sumSquared += voltageDifference * voltageDifference;                        // Acumular el cuadrado de la diferencia
     }
   }
