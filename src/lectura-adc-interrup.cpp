@@ -7,13 +7,13 @@ const float voltageRMS = 220.0;             // Voltaje RMS de la red eléctrica
 const float sensitivity = 0.069 ;           // Sensibilidad del ACS712 (100 mV/A para el modelo de 20A)
 const float adcResolution = 3.3 / 4096.0;   // Resolución del ADC del ESP32 (3.3V referencia / 4095 pasos)
 const float voltageOffset = 1.22;           // Voltaje de offset del sensor después del divisor resistivo (1.65V)
-
+const int M = 10; // Número de periodos a muestrear 
 float power = 0;
 // Variables LMS
 volatile int sensorValue = 0;
 
 volatile bool AdcReady = false;
-const int numSamples = 2000;  // Número de muestras totales
+int numSamples = 0;  // Número de muestras totales
 
 
 // Timer callback: se ejecuta cada T_us µs
@@ -38,8 +38,8 @@ void setup() {
   // Frecuencia de muestreo: 2000 Hz (cada 500 µs)
   const int T_us = 500;
   esp_timer_start_periodic(periodic_timer, T_us);
-
-  int numSamples = 0;
+  const float Samples_per_period = (20e-3)/T_us; //cantidad de muestras por periodo de 20 ms (50 Hz)
+  int numSamples = int(M*Samples_per_period); // Número de muestras totales (20 ms)
 }
 
 void loop() {
