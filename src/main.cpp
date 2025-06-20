@@ -1,243 +1,168 @@
 #include <Arduino.h>
-#include <esp_now.h>
-#include <WiFi.h>
-#define MAX_PEERS 10  
+#include <driver/adc.h>
 
-uint8_t peers[MAX_PEERS][6];  
-int peerCount = 0;
+// Pines y configuración
+const int sensorPin = 34;                       // GPIO34 -> ADC1_CHANNEL_6
+const int Interruptor = 14;
+const int rele = 26;
+const int ledRojo1 = 23, ledRojo2 = 22;
+const int ledAmarillo1 = 21, ledAmarillo2 = 19;
+const int ledVerde1 = 18, ledVerde2 = 5;
 
-typedef struct {
-  float consumoActual;
-  int prioridad;
-} EnergiaData;
+// Constantes de cálculo
+const float voltageRMS = 220.0f;
+const float adcResolution = 3.3f / 4095.0f;
 
-EnergiaData energia;
-const int prioridadNodo = 2;  
-bool cargaEncendida = true;
-bool inicioCom = true;
+// Parámetros de muestreo
+const float lineFreq = 50;
+const int Fs = 10000;
+const int samplesPerPeriod = Fs / lineFreq;
+const int periodsToCapture = 50;
+const int bufferSize = samplesPerPeriod * periodsToCapture;
 
-uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+// Buffers y flags
+static volatile uint16_t adcBuffer[bufferSize];
+static volatile int bufferIndex = 0;
+static volatile bool bufferFull = false;
+static float voltageOffset = 0.0f;
 
-const int sensorPin = 34;                   // Pin ADC donde se conecta la salida del ACS712
+// Temporizador hardware
+hw_timer_t* samplingTimer = nullptr;
 
-const int Interruptor = 14;   
-const int rele = 26;  
-const int ledRojo1 = 23;
-const int ledRojo2 = 22;
-const int ledAmarillo1 = 21;
-const int ledAmarillo2 = 19;
-const int ledVerde1 = 18;
-const int ledVerde2 = 5;
-
-const float voltageRMS = 220.0;             // Voltaje RMS de la red eléctrica
-const float sensitivity = 0.069 ;           // Sensibilidad del ACS712 (100 mV/A para el modelo de 20A)
-const float adcResolution = 3.3 / 4096.0;   // Resolución del ADC del ESP32 (3.3V referencia / 4095 pasos)
-const float voltageOffset = 1.22;           // Voltaje de offset del sensor después del divisor resistivo (1.65V)
-
-const int numSamples = 8000;                // Número de muestras totales 
-
-float power = 0;
-float powerKm1 = 0;
-float powerKm2 = 0;
-float powerKm3 = 0;
-float powerMEDIAMOVIL = 0;
-
-void agregarPeer(const uint8_t *mac) {
-  if (peerCount >= MAX_PEERS) return;  
-
-  for (int i = 0; i < peerCount; i++) {
-    if (memcmp(peers[i], mac, 6) == 0) return;  // Ya está registrado
-  }
-
-  memcpy(peers[peerCount], mac, 6);
-  peerCount++;
-
-  esp_now_peer_info_t peerInfo = {};
-  memcpy(peerInfo.peer_addr, mac, 6);
-  peerInfo.channel = 0;
-  peerInfo.encrypt = false;
-
-  if (esp_now_add_peer(&peerInfo) == ESP_OK) Serial.println("Peer agregado correctamente");
-  else Serial.println("Error al agregar peer");
-}
-
-// Función para enviar información a todos los peers
-void enviarInformacion() {
-  if(inicioCom){
-    esp_now_send(broadcastAddress, (uint8_t *)&energia, sizeof(energia));
-    inicioCom = false;
-  }
-  else{
-    for (int i = 0; i < peerCount; i++) {
-      esp_now_send(peers[i], (uint8_t *)&energia, sizeof(energia));
+// ---------------------------------------------
+// ISR de muestreo: lectura rápida de ADC y buffer
+void IRAM_ATTR onTimerCallback() {
+  if (!bufferFull && bufferIndex < bufferSize) {
+    adcBuffer[bufferIndex++] = adc1_get_raw(ADC1_CHANNEL_6);
+    if (bufferIndex >= bufferSize) {
+      bufferFull = true;
     }
   }
 }
 
-// Callback de recepción
-void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
-  if (len == sizeof(float)) { // MENSAJE DEL MAESTRO
-      float energiaDisponible;
-      memcpy(&energiaDisponible, data, sizeof(float));
-      Serial.println("\n\n\n");
-      Serial.printf("MENSAJE DEL MAESTRO ");
-      for (int i = 0; i < 6; i++) Serial.printf("%02X:", mac[i]);
-      Serial.println();
-      Serial.printf("Energía disponible: %.2f W\n", energiaDisponible);
+// Inicia muestreo periódico
+auto startSampling = []() {
+  bufferIndex = 0;
+  bufferFull = false;
+  timerAlarmDisable(samplingTimer);
 
-      agregarPeer(mac);  // REGISTRAR MAESTRO COMO PEER
+  // This is where we indicate the frequency of the interrupts.
+  // The value "1000000UL / Fs" (because of the prescaler we set in timerBegin) will produce
+  // one interrupt every 100 us (10kHz).
+  // The 3rd parameter is true so that the counter reloads when it fires an interrupt, and so we
+  // can get periodic interrupts (instead of a single interrupt).
+  timerAlarmWrite(samplingTimer, 1000000UL / Fs, true);
 
-      // Actualizar información
-      energia.consumoActual = random(10, 50) / 10.0;
-      energia.prioridad = prioridadNodo;
+  timerAlarmEnable(samplingTimer);
+};
 
-      // Ajustar estado de carga
-      if (energiaDisponible < 20.0 && prioridadNodo == 3) cargaEncendida = false;
-      else if (energiaDisponible < 10.0 && prioridadNodo == 2) cargaEncendida = false;
-      else cargaEncendida = true;
-
-      Serial.println(cargaEncendida ? "Carga encendida" : "Carga apagada");
-      enviarInformacion();  
-  }
-  else { // MENSAJE DE OTRO ESCLAVO
-      EnergiaData mensaje;
-      memcpy(&mensaje, data, sizeof(mensaje));
-
-      Serial.printf("MENSAJE DEL ESCLAVO ");
-      for (int i = 0; i < 6; i++) Serial.printf("%02X:", mac[i]);
-      Serial.println();
-      Serial.printf("Consumo: %.2f W, Prioridad: %d\n", mensaje.consumoActual, mensaje.prioridad);
-
-      agregarPeer(mac);  // REGISTRAR OTRO ESCLAVO COMO PEER
-  }
+// Detiene muestreo
+inline void stopSampling() {
+  timerAlarmDisable(samplingTimer);
 }
-
-/*
-// Callback de envío
-void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  Serial.printf("Envío a %02X:%02X:%02X:%02X:%02X:%02X - %s\n",
-                mac_addr[0], mac_addr[1], mac_addr[2],
-                mac_addr[3], mac_addr[4], mac_addr[5],
-                status == ESP_NOW_SEND_SUCCESS ? "Éxito" : "Fallo");
-}
-*/
 
 void setup() {
-  
   Serial.begin(115200);
-  analogReadResolution(12);                 // Configurar resolución del ADC a 12 bits
 
-  pinMode(Interruptor, INPUT);              // Configurar entrada
-  pinMode(rele, OUTPUT);                    // Configurar salida
-  pinMode(ledRojo1, OUTPUT); 
-  pinMode(ledRojo2, OUTPUT); 
-  pinMode(ledAmarillo1, OUTPUT); 
-  pinMode(ledAmarillo2, OUTPUT); 
+  // Configurar pines
+  pinMode(sensorPin, INPUT);
+  pinMode(Interruptor, INPUT);
+  pinMode(rele, OUTPUT);
+  pinMode(ledRojo1, OUTPUT);
+  pinMode(ledRojo2, OUTPUT);
+  pinMode(ledAmarillo1, OUTPUT);
+  pinMode(ledAmarillo2, OUTPUT);
   pinMode(ledVerde1, OUTPUT);
   pinMode(ledVerde2, OUTPUT);
-  
-  WiFi.mode(WIFI_STA);
 
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("Error al inicializar ESP-NOW");
-    return;
-  }
+  // Configurar ADC
+  //https://docs.espressif.com/projects/arduino-esp32/en/latest/api/adc.html#analogsetattenuation 
+  analogSetPinAttenuation(sensorPin, ADC_11db);
+  // this function is used to set the hardware sample bits and read resolution. Default is 12 bits (0 - 4095). Range is 9 - 12.
+  adc1_config_width(ADC_WIDTH_BIT_12);
+  // ADC_ATTEN_DB_12-> 150 mV ~ 3100 mV
+  adc1_config_channel_atten(ADC1_CHANNEL_6, ADC_ATTEN_DB_12);
 
-  esp_now_register_recv_cb(OnDataRecv);
-  //esp_now_register_send_cb(OnDataSent);
+  // Initilise the timer.
+  // Parameter 1 is the timer we want to use. Valid: 0, 1, 2, 3 (total 4 timers)
+  // Parameter 2 is the prescaler. The ESP32 default clock is at 80MhZ. The value "80" will
+  // divide the clock by 80, giving us 1,000,000 ticks per second.
+  // Parameter 3 is true means this counter will count up, instead of down (false).
+  samplingTimer = timerBegin(0, 80, true);
 
-  esp_now_peer_info_t peerInfo = {};
-  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
-  peerInfo.channel = 0;
-  peerInfo.encrypt = false;
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-    Serial.println("Error al agregar el peer de broadcast");
-  }
+  // Attach the timer to the interrupt service routine named "onTimerCallback".
+  // The 3rd parameter is set to "true" to indicate that we want to use the "edge" type (instead of "flat").
+  timerAttachInterrupt(samplingTimer, onTimerCallback, true);
 
-  
+  // --- CALIBRACIÓN DE OFFSET ---
+  // Encender LEDs 
   digitalWrite(ledRojo1, HIGH);
-  delay(300);
+  delay(200);
   digitalWrite(ledRojo2, HIGH);
-  delay(300);
+  delay(200);
   digitalWrite(ledAmarillo1, HIGH);
-  delay(300);
+  delay(200);
   digitalWrite(ledAmarillo2, HIGH);
-  delay(300);
+  delay(200);
   digitalWrite(ledVerde1, HIGH);
-  delay(300);
+  delay(200);
   digitalWrite(ledVerde2, HIGH);
-  delay(300);
 
+  Serial.println("Iniciando calibración de offset...");
+  startSampling();
+  while (!bufferFull) { }
+  stopSampling();
+
+  float sum = 0.0f;
+  for (int i = 0; i < bufferIndex; i++) {
+    sum += adcBuffer[i] * adcResolution;
+  }
+  voltageOffset = sum / bufferIndex;
+  voltageOffset=roundf(voltageOffset * 10000.0f) / 10000.0f;   // Redondear a 4 decimales
+  Serial.printf("Offset calibrado: %.5f V\n", voltageOffset);
+
+  // Apagar LEDs
   delay(1000);
-  digitalWrite(ledVerde2, LOW);
-  delay(300);
+  digitalWrite(ledRojo1, LOW);
+  delay(200);
+  digitalWrite(ledRojo2, LOW);
+  delay(200);
+  digitalWrite(ledAmarillo1, LOW);
+  delay(200);
+  digitalWrite(ledAmarillo2, LOW);
+  delay(200);
   digitalWrite(ledVerde1, LOW);
-  delay(300);
-  digitalWrite(ledAmarillo2, LOW);
-  delay(300);
-  digitalWrite(ledAmarillo1, LOW);
-  delay(300);
-  digitalWrite(ledRojo2, LOW);
-  delay(300);
-  digitalWrite(ledRojo1, LOW);
-  
-  
-  digitalWrite(ledAmarillo2, LOW);
-  digitalWrite(ledRojo1, LOW);
-  digitalWrite(ledRojo2, LOW);
-  
-  digitalWrite(ledAmarillo1, LOW);
-  
+  delay(200);
+  digitalWrite(ledVerde2, LOW);
 
+
+  startSampling();   // Iniciar muestreo continuo
 }
 
 void loop() {
- 
-  int estado = digitalRead(Interruptor);                                          // activar circulacion en la carga
-  (estado == HIGH) ? digitalWrite(rele, HIGH) : digitalWrite(rele, LOW);
-  
-  float sumSquared = 0;
-  int sensorValue = 0;
-  float voltage = 0;
-  float voltageDifference = 0;
+  int estado = digitalRead(Interruptor);
+  digitalWrite(rele, estado == HIGH ? LOW : HIGH);
 
-  if (estado == HIGH){
-    Serial.println(estado);
-    delay(1000);
-    for (int i = 0; i < numSamples; i++) {
-      sensorValue = analogRead(sensorPin);                                        // Leer valor del ADC
-      voltage = sensorValue * adcResolution;                                      // Convertir a voltaje
-      Serial.println(voltage);                                                  // calibracion
-      voltageDifference = voltage - voltageOffset;                                // Restar el offset
-      //voltageDifference = (voltageDifference <= 0.015) ?  0 : voltageDifference;  // ventana de histeresis
-      sumSquared += voltageDifference * voltageDifference;                        // Acumular el cuadrado de la diferencia
+  if (bufferFull) {
+  float sumsq = 0.0f;
+  for (int i = 0; i < bufferIndex; i++) {
+      float V = adcBuffer[i] * adcResolution;
+      V = roundf(V * 10000.0f) / 10000.0f;       // Redondear a 4 decimales
+      V = V - voltageOffset;
+      sumsq += V * V;
     }
+    float Vrms = sqrt(sumsq / bufferIndex);
+    Vrms = roundf(Vrms * 10000.0f) / 10000.0f;
+    Vrms = Vrms - 0.015;
+    Vrms=(Vrms<0.0005)?0:Vrms;
+    float currentRMS = Vrms / 0.07f;
+    currentRMS = roundf(currentRMS * 10000.0f) / 10000.0f;
+    float power = voltageRMS * currentRMS;
+
+    Serial.printf("%.4f, %.4f, %.4f\n", Vrms, currentRMS, power);
+
+    // Reiniciar ciclo de muestreo
+    stopSampling();
+    startSampling();
   }
-  
-  // Calcular el valor cuadrático medio (RMS) del voltaje
-  float meanSquare = sumSquared / numSamples;
-  float voltageRMS_ACS712 = sqrt(meanSquare);
-
-  // Convertir el voltaje RMS a corriente RMS
-  float currentRMS = (voltageRMS_ACS712) / sensitivity;
-
-  // Calcular la potencia aparente
-  power = voltageRMS * currentRMS;
-
-  powerMEDIAMOVIL = (power + powerKm1 + powerKm2 + powerKm3)/4;
-  powerKm3 = powerKm2;
-  powerKm2 = powerKm1;
-  powerKm1 = power;
-
-  int power1 = powerMEDIAMOVIL;
-
-  // Mostrar los resultados en el monitor serie
-  Serial.print("\n\n\nVoltaje RMS: ");
-  Serial.print(voltageRMS_ACS712, 4);
-  Serial.print("\nCorriente RMS: ");
-  Serial.print(currentRMS, 3);
-  Serial.print("\nPotencia: ");
-  Serial.print(power1);
-  Serial.print(" W");
-
 }
