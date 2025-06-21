@@ -53,7 +53,7 @@ void onDataRecv(const uint8_t* mac, const uint8_t* buf, int len) {
 void purgeStalePeers() {
   unsigned long now = millis();
   for (int i = peers.size() - 1; i >= 0; --i) {
-    if (now - peers[i].lastSeen > WINDOW_MS) {
+    if (now - peers[i].lastSeen > 10*WINDOW_MS) {
       peers.erase(peers.begin() + i);
     }
   }
