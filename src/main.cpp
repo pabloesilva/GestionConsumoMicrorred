@@ -1,5 +1,19 @@
 #include <Arduino.h>
 #include <driver/adc.h>
+#include <esp_now.h>
+#include <WiFi.h>
+#include <vector>
+
+// direccion broadcast para ESP-NOW
+static uint8_t broadcastAddress[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+
+// estructura de mensaje de consenso
+typedef struct {
+  float power;
+} consensus_msg_t;
+
+// almacenamiento de potencias recibidas
+static std::vector<uint32_t> peerPowers;
 
 // Pines y configuración
 const int sensorPin = 34;                       // GPIO34 -> ADC1_CHANNEL_6
@@ -61,8 +75,38 @@ inline void stopSampling() {
   timerAlarmDisable(samplingTimer);
 }
 
+// callback de recepcion ESP-NOW
+void onDataRecv(const uint8_t* mac, const uint8_t* buf, int len) {
+  if (len == sizeof(consensus_msg_t)) {
+    consensus_msg_t msg;
+    memcpy(&msg, buf, len);
+    uint32_t val = (uint32_t)(msg.power * 1000.0f);
+    peerPowers.push_back(val);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
+
+  // configurar wifi en modo station para ESP-NOW
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+
+  // inicializar ESP-NOW
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("error inicializando esp-now");
+    return;
+  }
+  esp_now_register_recv_cb(onDataRecv);
+
+  // agregar peer broadcast
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("error agregando peer broadcast");
+  }
 
   // Configurar pines
   pinMode(sensorPin, INPUT);
@@ -164,5 +208,24 @@ void loop() {
     // Reiniciar ciclo de muestreo
     stopSampling();
     startSampling();
+
+    // enviar valor local via ESP-NOW
+    consensus_msg_t msg = { power };
+    esp_now_send(broadcastAddress, (uint8_t*)&msg, sizeof(msg));
+
+    // ventana para recepcion de datos
+    delay(1000);
+
+    // calcular consenso medio
+    float sumP = power;
+    int count = 1;
+    for (uint32_t val : peerPowers) {
+      sumP += (float)val / 1000.0f;
+      count++;
+    }
+    peerPowers.clear();
+    float consensus = sumP;
+
+    Serial.printf("\n\npotencia consenso: %.4f W (nodos=%d)\n", consensus, count);
   }
 }
