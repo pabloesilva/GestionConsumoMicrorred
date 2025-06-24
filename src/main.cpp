@@ -86,20 +86,13 @@ void handleRoot() {
 <head>
   <meta charset="utf-8">
   <title>Dashboard Energía</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
-    body { font-family: serif; padding: 20px; }
-    h1 { font-size: 36px; font-weight: bold; }
-    p  { font-size: 20px; }
-    table {
-      border-collapse: collapse;
-      margin-top: 20px;
-      font-size: 18px;
-    }
-    th, td {
-      border: 1px solid black;
-      padding: 6px 12px;
-      text-align: center;
-    }
+    body { font-family: sans-serif; padding: 20px; }
+    h1 { font-size: 24px; }
+    table { border-collapse: collapse; margin-top: 20px; }
+    th, td { border: 1px solid black; padding: 5px; }
+    #chart-container { width: 100%; max-width: 700px; margin-top: 40px; }
   </style>
 </head>
 <body>
@@ -109,23 +102,82 @@ void handleRoot() {
   <table id="nodes">
     <tr><th>Dirección MAC</th><th>Consumo(W)</th><th>Prioridad</th><th>Ultimo Mensaje(ms)</th></tr>
   </table>
+  <div id="chart-container">
+    <canvas id="chart"></canvas>
+  </div>
 
   <script>
+    const historyLength = 60;
+    const labels = [];
+    const datasets = {};
+    const totalPowerData = [];
+
+    const ctx = document.getElementById('chart').getContext('2d');
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: []
+      },
+      options: {
+        responsive: true,
+        animation: false,
+        scales: {
+          x: { title: { display: true, text: 'Tiempo (s)' } },
+          y: { title: { display: true, text: 'Potencia (W)' }, min: 0 }
+        }
+      }
+    });
+
     async function refresh() {
       const resp = await fetch('/data');
       const j = await resp.json();
 
-      document.getElementById('avail').textContent = j.availablePower.toFixed(2);
+      const now = new Date().toLocaleTimeString();
+      labels.push(now);
+      if (labels.length > historyLength) labels.shift();
 
-      let total = 0;
+      document.getElementById('avail').textContent = j.availablePower.toFixed(2);
+      
+      let totalPower = 0;
       const tbl = document.getElementById('nodes');
       tbl.innerHTML = '<tr><th>Dirección MAC</th><th>Consumo(W)</th><th>Prioridad</th><th>Ultimo Mensaje(ms)</th></tr>';
       j.nodes.forEach(n => {
-        total += n.power;
+        totalPower += n.power;
         tbl.innerHTML += `<tr><td>${n.mac}</td><td>${n.power.toFixed(2)}</td><td>${n.priority}</td><td>${n.age}</td></tr>`;
+
+        if (!datasets[n.mac]) {
+          const color = '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6, '0');
+          datasets[n.mac] = {
+            label: n.mac,
+            borderColor: color,
+            fill: false,
+            data: []
+          };
+          chart.data.datasets.push(datasets[n.mac]);
+        }
+
+        datasets[n.mac].data.push(n.power);
+        if (datasets[n.mac].data.length > historyLength) datasets[n.mac].data.shift();
       });
 
-      document.getElementById('total').textContent = total.toFixed(2);
+      document.getElementById('total').textContent = totalPower.toFixed(2);
+
+      // Total consumption tracking
+      if (!datasets['total']) {
+        datasets['total'] = {
+          label: "Total",
+          borderColor: "#000",
+          borderWidth: 2,
+          fill: false,
+          data: []
+        };
+        chart.data.datasets.push(datasets['total']);
+      }
+      datasets['total'].data.push(totalPower);
+      if (datasets['total'].data.length > historyLength) datasets['total'].data.shift();
+
+      chart.update();
     }
 
     setInterval(refresh, 1000);
@@ -136,6 +188,7 @@ void handleRoot() {
 )rawliteral";
   server.send(200, "text/html", html);
 }
+
 
 
 void handleData() {
