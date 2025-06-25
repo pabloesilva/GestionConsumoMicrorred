@@ -3,6 +3,9 @@
 #include <esp_now.h>
 #include <WiFi.h>
 #include <vector>
+#include "esp_adc_cal.h"
+
+esp_adc_cal_characteristics_t adc_chars;
 
 // direccion broadcast para ESP‑NOW
 static uint8_t broadcastAddress[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
@@ -174,6 +177,9 @@ void setup() {
   // The 3rd parameter is set to "true" to indicate that we want to use the "edge" type (instead of "flat").
   timerAttachInterrupt(samplingTimer, onTimerCallback, true);
 
+  //calibrar valores del ADC
+  esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_12, ADC_WIDTH_BIT_12, 1100, &adc_chars);
+
   // --- CALIBRACIÓN DE OFFSET ---
   // Encender LEDs 
   digitalWrite(ledRojo1, HIGH);
@@ -195,10 +201,10 @@ void setup() {
 
   float sum = 0.0f;
   for (int i = 0; i < bufferIndex; i++) {
-    sum += adcBuffer[i] * adcResolution;
+    uint32_t mV = esp_adc_cal_raw_to_voltage(adcBuffer[i], &adc_chars);
+    sum += mV / 1000.0f;  // convertir a voltios
   }
   voltageOffset = sum / bufferIndex;
-  voltageOffset=roundf(voltageOffset * 10000.0f) / 10000.0f;   // Redondear a 4 decimales
   Serial.printf("Offset calibrado: %.5f V\n", voltageOffset);
 
   // Apagar LEDs
@@ -229,17 +235,15 @@ void loop() {
   if (bufferFull) {
     float sumsq = 0.0f;
     for (int i = 0; i < bufferIndex; i++) {
-      float V = adcBuffer[i] * adcResolution;
-      V = roundf(V * 10000.0f) / 10000.0f;       // Redondear a 4 decimales
+      uint32_t mV = esp_adc_cal_raw_to_voltage(adcBuffer[i], &adc_chars);
+      float V = mV / 1000.0f;  // convertir a voltios
       V = V - voltageOffset;
       sumsq += V * V;
     }
     float Vrms = sqrt(sumsq / bufferIndex);
-    Vrms = roundf(Vrms * 10000.0f) / 10000.0f;
-    Vrms = Vrms - 0.015;
-    Vrms=(Vrms<0.0005)?0:Vrms;
+    Vrms = Vrms - 0.0135;
+    Vrms = (Vrms < 0.0005) ? 0 : Vrms;
     float currentRMS = Vrms / 0.07f;
-    currentRMS = roundf(currentRMS * 10000.0f) / 10000.0f;
     float power = voltageRMS * currentRMS;
 
     Serial.printf("%.4f, %.4f, %.4f\n", Vrms, currentRMS, power);
