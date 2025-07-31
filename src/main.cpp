@@ -10,6 +10,11 @@ esp_adc_cal_characteristics_t adc_chars;
 // direccion broadcast para ESP‑NOW
 static uint8_t broadcastAddress[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
+//estructura que llega del nodo informante
+typedef struct {
+  float availablePower;   // potencia total disponible (W)
+} availability_msg_t;
+
 // estructura de mensaje de consenso: potencia + prioridad
 typedef struct {
   float power;       // consumo o generación en W
@@ -38,6 +43,15 @@ const int rele = 33;
 const int ledRojo1 = 15, ledRojo2 = 4;
 const int ledAmarillo1 = 5, ledAmarillo2 = 19;
 const int ledVerde1 = 22, ledVerde2 = 23;
+// array con los pines en orden
+const int ledPins[6] = {
+  ledRojo1,
+  ledRojo2,
+  ledAmarillo1,
+  ledAmarillo2,
+  ledVerde1,
+  ledVerde2
+};
 
 // Constantes de cálculo
 const float voltageRMS = 220.0f;
@@ -93,6 +107,29 @@ inline void stopSampling() {
 
 // callback de recepción ESP-NOW
 void onDataRecv(const uint8_t* mac, const uint8_t* buf, int len) {
+  
+  //mensaje de disponibilidad
+  if (len == sizeof(availability_msg_t)) {
+    availability_msg_t msg;
+    memcpy(&msg, buf, len);
+
+    // definimos la franja de cada led
+    const float maxPower = 2200.0f;
+    const float segment = maxPower / 6.0f;  // ~366.67 W por led
+
+    // calculamos cuántos leds encender
+    int ledsOn = int(msg.availablePower / segment + 0.0001f);
+    if (ledsOn > 6) ledsOn = 6;
+    if (ledsOn < 0) ledsOn = 0;
+
+    // actualizar estados
+    for (int i = 0; i < 6; ++i) {
+      digitalWrite(ledPins[i], (i < ledsOn) ? HIGH : LOW);
+    }
+    return;
+  }
+  
+  // mensaje de concenso
   if (len != sizeof(consensus_msg_t)) return;
   consensus_msg_t msg;
   memcpy(&msg, buf, len);
@@ -114,7 +151,7 @@ void onDataRecv(const uint8_t* mac, const uint8_t* buf, int len) {
   np.lastSeen = millis();
   peers.push_back(np);
 }
-
+  
 // purgar peers que no hayan enviado en más de WINDOW_MS
 void purgeStalePeers() {
   unsigned long now = millis();
@@ -127,26 +164,6 @@ void purgeStalePeers() {
 
 void setup() {
   Serial.begin(115200);
-
-  // configurar wifi en modo station para ESP-NOW
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  
-  // inicializar ESP-NOW
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("error inicializando esp-now");
-    return;
-  }
-  esp_now_register_recv_cb(onDataRecv);
-
-  // agregar peer broadcast
-  esp_now_peer_info_t peerInfo = {};
-  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
-  peerInfo.channel = 0;
-  peerInfo.encrypt = false;
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-    Serial.println("error agregando peer broadcast");
-  }
 
   // Configurar pines
   pinMode(sensorPin, INPUT);
@@ -223,6 +240,26 @@ void setup() {
   delay(200);
   digitalWrite(ledVerde2, LOW);
 
+  
+  // configurar wifi en modo station para ESP-NOW
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  
+  // inicializar ESP-NOW
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("error inicializando esp-now");
+    return;
+  }
+  esp_now_register_recv_cb(onDataRecv);
+
+  // agregar peer broadcast
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("error agregando peer broadcast");
+  }
 
   startSampling();   // Iniciar muestreo continuo
 }
@@ -248,7 +285,7 @@ void loop() {
     float currentRMS = Vrms / 0.07f;
     float power = voltageRMS * currentRMS;
 
-    Serial.printf("%.4f, %.4f, %.4f\n", Vrms, currentRMS, power);
+    //Serial.printf("%.4f, %.4f, %.4f\n", Vrms, currentRMS, power);
 
     // Reiniciar ciclo de muestreo
     stopSampling();
@@ -270,11 +307,11 @@ void loop() {
     }
 
     // 6) mostrar estado
-    Serial.printf(
-      "nodosActivos: %d  consumoTotal: %.2f W\n", 
-      peers.size() + 1,     // +1 = este nodo
-      totalPower
-    );
+    // Serial.printf(
+    //   "nodosActivos: %d  consumoTotal: %.2f W\n", 
+    //   peers.size() + 1,     // +1 = este nodo
+    //   totalPower
+    // );
 
     // 7) lógica futura: usar p.priority de cada peer para conectar/desconectar cargas
 
