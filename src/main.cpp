@@ -32,11 +32,12 @@ const unsigned long WINDOW_MS = 200;
 
 // Pines y configuración
 const int sensorPin = 34;                       // GPIO34 -> ADC1_CHANNEL_6
-const int Interruptor = 14;
-const int rele = 26;
-const int ledRojo1 = 23, ledRojo2 = 22;
-const int ledAmarillo1 = 21, ledAmarillo2 = 19;
-const int ledVerde1 = 18, ledVerde2 = 5;
+const int Interruptor0 = 14;
+const int Interruptor1 = 26;
+const int rele = 33;
+const int ledRojo1 = 15, ledRojo2 = 4;
+const int ledAmarillo1 = 5, ledAmarillo2 = 19;
+const int ledVerde1 = 22, ledVerde2 = 23;
 
 // Constantes de cálculo
 const float voltageRMS = 220.0f;
@@ -149,7 +150,8 @@ void setup() {
 
   // Configurar pines
   pinMode(sensorPin, INPUT);
-  pinMode(Interruptor, INPUT);
+  pinMode(Interruptor0, INPUT);
+  pinMode(Interruptor1, INPUT);
   pinMode(rele, OUTPUT);
   pinMode(ledRojo1, OUTPUT);
   pinMode(ledRojo2, OUTPUT);
@@ -226,8 +228,8 @@ void setup() {
 }
 
 void loop() {
-  int estado = digitalRead(Interruptor);
-  digitalWrite(rele, estado == HIGH ? LOW : HIGH);
+  int estado = digitalRead(Interruptor0);
+  digitalWrite(rele, (estado == HIGH) ? LOW : HIGH);
 
   uint8_t myPriority = 0;                     // ejemplo: prioridad alta
 
