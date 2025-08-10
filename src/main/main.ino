@@ -56,7 +56,6 @@ const int ledPins[6] = {
 // Constantes de Cálculo
 const float voltageRMS = 220.0f;
 
-// Parámetros de muestreo
 const float lineFreq = 50;
 const int Fs = 20000;
 const int samplesPerPeriod = Fs / lineFreq;
@@ -254,6 +253,7 @@ void loop() {
     if (analogContinuousRead(&result, 0)){
       adcBuffer[bufferIndex++] = result[0].avg_read_mvolts;
       if (bufferIndex >= bufferSize) {
+        analogContinuousStop();
         bufferFull = true;
         bufferIndex = 0;
       }
@@ -262,7 +262,7 @@ void loop() {
 
 
   if (bufferFull) {
-    analogContinuousStop();
+       
     bufferFull = false;
     
     float sumsq = 0.0;
@@ -297,17 +297,17 @@ void loop() {
       totalPower += p.power;
     }
 
-    // Reiniciar ciclo de muestreo
-    delay(1000);
-    analogContinuousStart();
 
     // 6) mostrar estado
-    // Serial.printf(
-    //   "nodosActivos: %d  consumoTotal: %.2f W\n", 
-    //   peers.size() + 1,     // +1 = este nodo
-    //   totalPower
-    // );
+    Serial.printf(
+      "nodosActivos: %d  consumoTotal: %.2f W\n", 
+      peers.size() + 1,     // +1 = este nodo
+      totalPower
+    );
 
+    // Reiniciar ciclo de muestreo
+    // delay(1000);
+    analogContinuousStart();
     // 7) lógica futura: usar p.priority de cada peer para conectar/desconectar cargas
 
     // 8) esperar antes del próximo ciclo
