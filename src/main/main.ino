@@ -35,13 +35,14 @@ static std::vector<PeerData> peers;
 const unsigned long WINDOW_MS = 200;
 
 // Pines y configuración
-const int sensorPin = 34;                       // GPIO34 -> ADC1_CHANNEL_6
+const int sensorPin = 35;                       // GPIO34 -> ADC1_CHANNEL_6
 const int Interruptor0 = 14;
 const int Interruptor1 = 26;
-const int rele = 33;
+const int rele = 25;
 const int ledRojo1 = 15, ledRojo2 = 4;
 const int ledAmarillo1 = 5, ledAmarillo2 = 19;
 const int ledVerde1 = 22, ledVerde2 = 23;
+const int boton = 33;
 
 // array con los pines en orden
 const int ledPins[6] = {
@@ -55,6 +56,7 @@ const int ledPins[6] = {
 
 // Constantes de Cálculo
 const float voltageRMS = 220.0f;
+const float sensibility = 0.075f;
 
 const float lineFreq = 50;
 const int Fs = 20000;
@@ -275,7 +277,7 @@ void loop() {
     float Vrms = sqrt(sumsq / bufferSize);
     // Vrms = Vrms - 0.0135;
     // Vrms = (Vrms < 0.0005) ? 0 : Vrms;
-    float currentRMS = Vrms / 0.07f;
+    float currentRMS = Vrms / sensibility;
     float power = voltageRMS * currentRMS;
     // Serial.printf("Conversiones: %d\n", adc_coversion_count);
     Serial.printf("%.4f, %.4f, %.4f\n", Vrms, currentRMS, power);
