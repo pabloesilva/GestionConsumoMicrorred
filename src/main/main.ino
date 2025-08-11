@@ -83,13 +83,14 @@ void ARDUINO_ISR_ATTR adcComplete() {
   // adc_coversion_count++;
 }
 
+availability_msg_t msg;
 // callback de recepción ESP-NOW
 void onDataRecv(const esp_now_recv_info_t * info, const uint8_t* buf, int len) {
   uint8_t mac[6];
   memcpy(mac, info->src_addr, 6);
   //mensaje de disponibilidad
   if (len == sizeof(availability_msg_t)) {
-    availability_msg_t msg;
+    // availability_msg_t msg;
     memcpy(&msg, buf, len);
 
     // definimos la franja de cada led
@@ -235,18 +236,17 @@ void setup() {
     if (esp_now_add_peer(&peerInfo) != ESP_OK) {
       Serial.println("error agregando peer broadcast");
     }
-
+    digitalWrite(rele,HIGH);
     // Iniciar la conversión continua del ADC
     analogContinuousStart();
-
 }
 
 void loop() {
   
-  int estado = digitalRead(Interruptor0);
-  digitalWrite(rele, (estado == HIGH) ? LOW : HIGH);
+  // int estado = digitalRead(Interruptor0);
+  // digitalWrite(rele, (estado == HIGH) ? LOW : HIGH);
 
-  uint8_t myPriority = 0;                     // ejemplo: prioridad alta
+  uint8_t myPriority = 255;                     // ejemplo: prioridad alta
 
   if (adc_coversion_done){
     adc_coversion_done = false;
@@ -279,11 +279,12 @@ void loop() {
     float power = voltageRMS * currentRMS;
     // Serial.printf("Conversiones: %d\n", adc_coversion_count);
     Serial.printf("%.4f, %.4f, %.4f\n", Vrms, currentRMS, power);
+    Serial.printf("Valor rele: %d \n", digitalRead(rele));
 
     
 
-    consensus_msg_t msg = { power, myPriority };
-    esp_now_send(broadcastAddress, (uint8_t*)&msg, sizeof(msg));
+    consensus_msg_t msg_1 = { power, myPriority };
+    esp_now_send(broadcastAddress, (uint8_t*)&msg_1, sizeof(msg));
 
     // 3) esperar ventana para recibir de todos
     delay(WINDOW_MS);
@@ -307,9 +308,24 @@ void loop() {
 
     // Reiniciar ciclo de muestreo
     // delay(1000);
-    analogContinuousStart();
+
     // 7) lógica futura: usar p.priority de cada peer para conectar/desconectar cargas
 
+    if (totalPower > msg.availablePower) {
+      uint8_t minPriority = 255;
+      for (auto &p : peers) {
+        if (p.priority > minPriority) {
+          minPriority = p.priority;
+        }
+      }
+      // Decidir si me desconecto
+      if (myPriority == minPriority) {
+        digitalWrite(rele, LOW);  // Apagar carga
+      }
+    }else{
+      digitalWrite(rele, HIGH);
+    }
+    analogContinuousStart();
     // 8) esperar antes del próximo ciclo
 
   }
