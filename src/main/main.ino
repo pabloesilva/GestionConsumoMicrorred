@@ -4,7 +4,6 @@
 
 #define CONVERSIONS_PER_PIN 3
 
-// esp_adc_cal_characteristics_t adc_chars;
 
 // direccion broadcast para ESP-NOW
 static uint8_t broadcastAddress[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
@@ -17,8 +16,12 @@ typedef struct {
 // estructura de mensaje de consenso: potencia + prioridad
 typedef struct {
   float power;       // consumo o generación en W
-  uint8_t priority;  // 0 = más alta, 255 = más baja
+  uint8_t priority;  // 0 = más alta, 3 = más baja
 } consensus_msg_t;
+
+//variable para guardar el ultimo consumo para la reconexión
+float lastPower = 0;
+float totalPower = 0;
 
 // datos de cada peer, indexados por MAC
 struct PeerData {
@@ -32,7 +35,7 @@ struct PeerData {
 static std::vector<PeerData> peers;
 
 // ventana de recepción en milisegundos
-const unsigned long WINDOW_MS = 200;
+const unsigned long WINDOW_MS = 600;
 
 // Pines y configuración
 const int sensorPin = 34;                       // GPIO34 -> ADC1_CHANNEL_6
@@ -55,6 +58,8 @@ const int ledPins[6] = {
 
 // Constantes de Cálculo
 const float voltageRMS = 220.0f;
+const float sensibility = 0.07f;
+
 
 const float lineFreq = 50;
 const int Fs = 20000;
@@ -83,7 +88,7 @@ void ARDUINO_ISR_ATTR adcComplete() {
   // adc_coversion_count++;
 }
 
-availability_msg_t msg;
+availability_msg_t msg_disp;
 // callback de recepción ESP-NOW
 void onDataRecv(const esp_now_recv_info_t * info, const uint8_t* buf, int len) {
   uint8_t mac[6];
@@ -91,14 +96,14 @@ void onDataRecv(const esp_now_recv_info_t * info, const uint8_t* buf, int len) {
   //mensaje de disponibilidad
   if (len == sizeof(availability_msg_t)) {
     // availability_msg_t msg;
-    memcpy(&msg, buf, len);
+    memcpy(&msg_disp, buf, len);
 
     // definimos la franja de cada led
     const float maxPower = 2200.0f;
     const float segment = maxPower / 6.0f;  // ~366.67 W por led
 
     // calculamos cuÃ¡ntos leds encender
-    int ledsOn = int(msg.availablePower / segment + 0.0001f);
+    int ledsOn = int(msg_disp.availablePower / segment + 0.0001f);
     if (ledsOn > 6) ledsOn = 6;
     if (ledsOn < 0) ledsOn = 0;
 
@@ -246,87 +251,117 @@ void loop() {
   // int estado = digitalRead(Interruptor0);
   // digitalWrite(rele, (estado == HIGH) ? LOW : HIGH);
 
-  uint8_t myPriority = 255;                     // ejemplo: prioridad alta
+  uint8_t myPriority = 3;                     // ejemplo: prioridad alta
 
-  if (adc_coversion_done){
-    adc_coversion_done = false;
-    if (analogContinuousRead(&result, 0)){
-      adcBuffer[bufferIndex++] = result[0].avg_read_mvolts;
-      if (bufferIndex >= bufferSize) {
-        analogContinuousStop();
-        bufferFull = true;
-        bufferIndex = 0;
+  if (digitalRead(rele)){
+    if (adc_coversion_done){
+      adc_coversion_done = false;
+      if (analogContinuousRead(&result, 0)){
+        adcBuffer[bufferIndex++] = result[0].avg_read_mvolts;
+        if (bufferIndex >= bufferSize) {
+          analogContinuousStop();
+          bufferFull = true;
+          bufferIndex = 0;
+        }
       }
-  }
-  }
-
-
-  if (bufferFull) {
-       
-    bufferFull = false;
-    
-    float sumsq = 0.0;
-  
-    for (int i = 0; i < bufferSize; i++) {
-      float V = adcBuffer[i] / 1000.0f;  // convertir a voltios
-      V = V - voltageOffset;
-      sumsq += V * V;
     }
-    float Vrms = sqrt(sumsq / bufferSize);
-    // Vrms = Vrms - 0.0135;
-    // Vrms = (Vrms < 0.0005) ? 0 : Vrms;
-    float currentRMS = Vrms / 0.07f;
-    float power = voltageRMS * currentRMS;
-    // Serial.printf("Conversiones: %d\n", adc_coversion_count);
-    Serial.printf("%.4f, %.4f, %.4f\n", Vrms, currentRMS, power);
-    Serial.printf("Valor rele: %d \n", digitalRead(rele));
+    if (bufferFull) {  
+      bufferFull = false;
+      float sumsq = 0.0;
+      for (int i = 0; i < bufferSize; i++) {
+        float V = adcBuffer[i] / 1000.0f;  // convertir a voltios
+        V = V - voltageOffset;
+        sumsq += V * V;
+      }
+      float Vrms = sqrt(sumsq / bufferSize);
+      // Vrms = Vrms - 0.0135;
+      // Vrms = (Vrms < 0.0005) ? 0 : Vrms;
+      float currentRMS = Vrms / sensibility;
+      float power = voltageRMS * currentRMS;
+      // Serial.printf("Conversiones: %d\n", adc_coversion_count);
+      Serial.printf("%.4f, %.4f, %.4f\n", Vrms, currentRMS, power);
+      // Serial.printf("Valor rele: %d \n", digitalRead(rele));
 
-    
+      
 
-    consensus_msg_t msg_1 = { power, myPriority };
-    esp_now_send(broadcastAddress, (uint8_t*)&msg_1, sizeof(msg));
+      consensus_msg_t msg_send = { power, myPriority };
+      esp_now_send(broadcastAddress, (uint8_t*)&msg_send, sizeof(msg_send));
 
-    // 3) esperar ventana para recibir de todos
-    delay(WINDOW_MS);
+      // 3) esperar ventana para recibir de todos
+      delay(WINDOW_MS);
 
-    // // 4) purgar peers inactivos
-    purgeStalePeers();
+      // // 4) purgar peers inactivos
+      purgeStalePeers();
 
-    // // 5) calcular potencia total (suma de todos los nodos)
-    float totalPower = power;
+      // // 5) calcular potencia total (suma de todos los nodos)
+      totalPower = power;
+      for (auto &p : peers) {
+        totalPower += p.power;
+      }
+
+
+      // 6) mostrar estado
+      Serial.printf(
+        "nodosActivos: %d  consumoTotal: %.2f W\n", 
+        peers.size() + 1,     // +1 = este nodo
+        totalPower
+      );
+
+      // Reiniciar ciclo de muestreo
+      // delay(1000);
+
+      // 7) lógica futura: usar p.priority de cada peer para conectar/desconectar cargas
+
+      if (totalPower > msg_disp.availablePower) {
+        Serial.printf("1 \n");
+        uint8_t minPriority = 1;
+        uint8_t samePriority = 0;
+        for (auto &p : peers) {
+          if (p.priority > minPriority) {
+            minPriority = p.priority;
+            if(p.priority == myPriority){
+              samePriority++;
+            }
+          }
+        }
+        if (minPriority < myPriority){
+          Serial.printf("2 \n");
+          minPriority = myPriority;
+        }
+        // Decidir si me desconecto
+        if (myPriority == minPriority) { //verificar si la priorirdad del nodo es la menor
+          Serial.printf("3 \n");
+          if(samePriority){ //si hay más de un nodo con la misma prioridad entra a comparar
+            for (auto &p : peers){
+              if(p.priority == myPriority && p.power > power){ //si tiene la misma prioridad y el consumo es menor
+                Serial.printf("4-1 \n");
+                lastPower = power;
+                digitalWrite(rele, LOW);  // Apagar carga
+              }
+            }
+          }else{ //no hay otro nodo con la misma prioridad
+            Serial.printf("4-2 \n");
+            lastPower = power;
+            digitalWrite(rele, LOW);  // Apagar carga
+          }
+        }
+      }
+      analogContinuousStart();
+      // 8) esperar antes del próximo ciclo
+
+    }
+  }else{
+    //se vuelve a calcular la potencia con el ultimo dato de consumo con una histéresis
+    totalPower = 1.05*lastPower;
     for (auto &p : peers) {
       totalPower += p.power;
     }
-
-
-    // 6) mostrar estado
-    Serial.printf(
-      "nodosActivos: %d  consumoTotal: %.2f W\n", 
-      peers.size() + 1,     // +1 = este nodo
-      totalPower
-    );
-
-    // Reiniciar ciclo de muestreo
-    // delay(1000);
-
-    // 7) lógica futura: usar p.priority de cada peer para conectar/desconectar cargas
-
-    if (totalPower > msg.availablePower) {
-      uint8_t minPriority = 255;
-      for (auto &p : peers) {
-        if (p.priority > minPriority) {
-          minPriority = p.priority;
-        }
-      }
-      // Decidir si me desconecto
-      if (myPriority == minPriority) {
-        digitalWrite(rele, LOW);  // Apagar carga
-      }
-    }else{
+    //para decidir si volverse a conectar o no se verifica si la potencia disponible es suficiente
+    if (msg_disp.availablePower - totalPower) > 0){
+      Serial.printf("5 \n");
       digitalWrite(rele, HIGH);
     }
-    analogContinuousStart();
-    // 8) esperar antes del próximo ciclo
-
   }
+
+
 }
