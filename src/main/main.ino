@@ -11,23 +11,23 @@ static uint8_t broadcastAddress[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
 //estructura que llega del nodo informante
 typedef struct {
-  float availablePower;   // potencia total disponible (W)
+  float availableCurrent;   // Corriente total disponible (A)
 } availability_msg_t;
 
 // estructura de mensaje de consenso: potencia + prioridad
 typedef struct {
-  float power;       // consumo o generación en W
+  float current;       // consumo o generación en A
   uint8_t priority;  // 0 = más alta, 3 = más baja
 } consensus_msg_t;
 
 //variable para guardar el ultimo consumo para la reconexión
-float lastPower = 0;
-float totalPower = 0;
+float lastCurrent = 0;
+float totalCurrent = 0;
 
 // datos de cada peer, indexados por MAC
 struct PeerData {
   uint8_t mac[6];
-  float power;
+  float current;
   uint8_t priority;
   unsigned long lastSeen;
 };  
@@ -61,9 +61,9 @@ const int ledPins[6] = {
 const float voltageRMS = 220.0f;
 const float sensibility = 0.07f;
 const float lineFreq = 50;
-const int Fs = 20000;
+const int Fs = 50000;
 const int samplesPerPeriod = Fs / lineFreq;
-const int periodsToCapture = 50;
+const int periodsToCapture = 10;
 const int bufferSize = samplesPerPeriod * periodsToCapture;
 
 // Buffers y flags
@@ -152,11 +152,11 @@ void onDataRecv(const esp_now_recv_info_t * info, const uint8_t* buf, int len) {
     memcpy(&msg_disp, buf, len);
 
     // definimos la franja de cada led
-    const float maxPower = 2200.0f;
-    const float segment = maxPower / 6.0f;  // ~366.67 W por led
+    const float maxCurrent = 10.0f;
+    const float segment = maxCurrent / 6.0f;  // ~1.66 A por led
 
     // calculamos cuantos se deben encender
-    int ledsOn = int(msg_disp.availablePower / segment + 0.0001f);
+    int ledsOn = int(msg_disp.availableCurrent / segment + 0.0001f);
     if (ledsOn > 6) ledsOn = 6;
     if (ledsOn < 0) ledsOn = 0;
 
@@ -182,7 +182,7 @@ void onDataRecv(const esp_now_recv_info_t * info, const uint8_t* buf, int len) {
   // buscar peer existente
   for (auto &p : peers) {
     if (memcmp(p.mac, mac, 6) == 0) {
-      p.power    = msg.power;
+      p.current    = msg.current;
       p.priority = msg.priority;
       p.lastSeen = millis();
       return;
@@ -191,7 +191,7 @@ void onDataRecv(const esp_now_recv_info_t * info, const uint8_t* buf, int len) {
   // si no existe, agregar nuevo
   PeerData np;
   memcpy(np.mac, mac, 6);
-  np.power    = msg.power;
+  np.current    = msg.current;
   np.priority = msg.priority;
   np.lastSeen = millis();
   peers.push_back(np);
@@ -369,14 +369,15 @@ void loop() {
       // Vrms = (Vrms < 0.0005) ? 0 : Vrms;       // ventana de histeresis para valores muy pequeños
       
       float currentRMS = Vrms / sensibility;      // convertir valor en tension a corriente
-      float power = voltageRMS * currentRMS;      // calculo de potencia aparente
+      // float power = voltageRMS * currentRMS;      // calculo de potencia aparente
       
       // mostrar valores calculados  por consola
-      Serial.printf("%.4f, %.4f, %.4f\n", Vrms, currentRMS, power);
+      // Serial.printf("Tension RMS: %.4f, Corriente RMS %.4f, %.4f\n", Vrms, currentRMS, power);
+      Serial.printf("Tension RMS: %.4f, Corriente RMS %.4f, %.4f\n", Vrms, currentRMS);
       // Serial.printf("Valor rele: %d \n", digitalRead(rele));
 
       // enviar mensaje de consumo a los demas nodos de consumo
-      consensus_msg_t msg_send = { power, myPriority };
+      consensus_msg_t msg_send = { currentRMS, myPriority };
       esp_now_send(broadcastAddress, (uint8_t*)&msg_send, sizeof(msg_send));
 
       // 3) esperar ventana para recibir de todos los nodos de consumo
@@ -386,20 +387,20 @@ void loop() {
       purgeStalePeers();
 
       // 5) calcular potencia total (suma de todos los nodos)
-      totalPower = power;
+      totalCurrent = currentRMS;
       for (auto &p : peers) {
-        totalPower += p.power;
+        totalCurrent += p.current;
       }
 
       // 6) mostrar estado por consola 
       Serial.printf(
         "nodosActivos: %d  consumoTotal: %.2f W\n", 
         peers.size() + 1,     // +1 = este nodo
-        totalPower
+        totalCurrent
       );
 
       // 7) conexion/desconexion cargas
-      if (totalPower > msg_disp.availablePower) {                   // primero chequear si el consumo supera la potencia disponible
+      if (totalCurrent > msg_disp.availableCurrent) {                   // primero chequear si el consumo supera la potencia disponible
         uint8_t minPriority = 1;                                    // se establece como base la prioridad no critica mas alta
         uint8_t samePriority = 0;                                   // tambien un contador si coincide la criticidad de uno o mas nodos 
         for (auto &p : peers) {                                     // se recorre la lista de peers y se actualiza a cual posee la prioridad minima
@@ -419,14 +420,14 @@ void loop() {
         if (myPriority == minPriority) {                            // verificar si la prioridad de este nodo es la menor
           if(samePriority){                                         // si hay más de un nodo con la misma prioridad 
             for (auto &p : peers){
-              if(p.priority == myPriority && p.power > power){      // si tiene la misma prioridad y el consumo es el menor
-                lastPower = power;                                  // guardar el ultimo consumo para la reconexión
+              if(p.priority == myPriority && p.current > currentRMS){      // si tiene la misma prioridad y el consumo es el menor
+                lastCurrent = currentRMS;                                  // guardar el ultimo consumo para la reconexión
                 digitalWrite(rele, LOW);                            // desconectar esta carga
               }
             }
           }
           else{                                                     // si no hay otro nodo con la misma prioridad
-            lastPower = power;
+            lastCurrent = currentRMS;
             digitalWrite(rele, LOW);                                // desconectar esta carga
           }
         }
@@ -435,12 +436,12 @@ void loop() {
     }
   }else{
     //se vuelve a calcular la potencia con el ultimo dato de consumo mas un 5%
-    totalPower = 1.05*lastPower;
+    totalCurrent = 1.05*lastCurrent;
     for (auto &p : peers) {
-      totalPower += p.power;
+      totalCurrent += p.current;
     }
     //para decidir si volverse a conectar o no se verifica si la potencia disponible es suficiente
-    if ((msg_disp.availablePower - totalPower) > 0){
+    if ((msg_disp.availableCurrent - totalCurrent) > 0){
       digitalWrite(rele, HIGH);
     }
   }
