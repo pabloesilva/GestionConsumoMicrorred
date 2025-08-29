@@ -58,7 +58,7 @@ const int ledPins[6] = {
 };
 
 // Constantes de Cálculo
-const float voltageRMS = 220.0f;
+// const float voltageRMS = 220.0f;
 const float sensibility = 0.07f;
 const float lineFreq = 50;
 const int Fs = 50000;
@@ -71,6 +71,7 @@ static volatile uint16_t adcBuffer[bufferSize];
 static volatile int bufferIndex = 0;
 static volatile bool bufferFull = false;
 static float voltageOffset = 0.0f;
+bool firstMeasure = true;
 
 //parármetros del ADC continuo
 uint8_t adc_pins[] = {sensorPin}; 
@@ -330,7 +331,7 @@ void setup() {
   digitalWrite(rele,HIGH);
 
   // iniciar la conversión continua del ADC
-  analogContinuousStart();
+  // analogContinuousStart();
 }
 
 
@@ -340,7 +341,11 @@ void loop() {
 
   // primer clausula, chequear si el circuito esta activo consumiendo corriente
   if (digitalRead(rele)){
-
+      if (firstMeasure){
+        delay(5000);
+        firstMeasure = false;
+        analogContinuousStart();
+    }
     // finalizacion de la conversion, se detiene el muestreo continuo
     if (adc_coversion_done){
       adc_coversion_done = false;
