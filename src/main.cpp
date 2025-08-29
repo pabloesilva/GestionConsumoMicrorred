@@ -7,19 +7,23 @@
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
 #include <cstring>
-
-static int canConsecFailures = 0;
-const int CAN_RESET_THRESHOLD = 5;
+#include <driver/adc.h>
+#include "esp_adc_cal.h"
 
 static uint8_t broadcastAddress[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
+// ------------------------------ estructura mensaje de disponibilidad -------------------------------------------
 struct availability_msg_t {
-  float availablePower;
+  float availableCurrent; 
 };
+
+// --------------------------------- estructura mensaje de consenso ----------------------------------------------
 struct consensus_msg_t {
   float power;
   uint8_t priority;
 };
+
+// ---------------------------- estructura para lista de nodos de consumo ----------------------------------------
 struct PeerData {
   uint8_t mac[6];
   float power;
@@ -28,59 +32,132 @@ struct PeerData {
 };
 
 static std::vector<PeerData> peers;
-const unsigned long WINDOW_MS = 600;
-
+const unsigned long WINDOW_MS = 600; // ventana para considerar nodos activos
 static unsigned long lastMessageTime = 0;
 static unsigned long secondLastMessageTime = 0;
 
-// Nuevas variables para el intervalo de CAN
-static unsigned long lastCanSentTime = 0;
-static unsigned long secondLastCanSentTime = 0;
 
-#define CAN_CS_PIN 5
-#define CAN_INT_PIN 4
-MCP2515 mcp2515(CAN_CS_PIN);
-struct can_frame canMsg;
-
+// ------------------------------------------- pantalla OLED -----------------------------------------------------
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
+// ----------------------------------- Variables para comunicacion CAN -------------------------------------------
+#define CAN_CS_PIN 5
+#define CAN_INT_PIN 4
 #define MAX_CAN_RETRIES 3
+MCP2515 mcp2515(CAN_CS_PIN);
+struct can_frame canMsg;
+static int canConsecFailures = 0;
+const int CAN_RESET_THRESHOLD = 5;
+static unsigned long lastCanSentTime = 0;
+static unsigned long secondLastCanSentTime = 0;
+bool canInitOk = false;
+unsigned long lastCanAttemptMillis = 0;
+unsigned long lastAvailabilitySend = 0;
+const unsigned long availabilityInterval = WINDOW_MS; 
+const unsigned long canInterval = 1000;
 
-const int buttonPin = 27;
-volatile bool screenToggleRequested = false;
-int screenIndex = 0; // 0 = main consumption screen, 1 = CAN status screen
+// ---------------------------------------------- botones --------------------------------------------------------
+const int btnPrevPin = 14;   // Prev / scroll up / previous screen
+const int btnNextPin = 27;   // Next / scroll down / next screen
+const int btnHomePin = 26;   // Home / go to main / long press -> reboot
 
-unsigned long lastButtonChange = 0;
-bool lastButtonState = HIGH;
+// estados y debounce
+struct BtnState {
+  int pin;
+  bool lastState;
+  unsigned long lastChange;
+  unsigned long pressedSince;
+};
+
+BtnState btnPrev = { btnPrevPin, HIGH, 0, 0 };
+BtnState btnNext = { btnNextPin, HIGH, 0, 0 };
+BtnState btnHome = { btnHomePin, HIGH, 0, 0 };
+
 const unsigned long debounceMs = 50;
 const unsigned long longPressMs = 3000;
-unsigned long buttonPressedSince = 0;
 
-bool canInitOk = false;
-unsigned long lastCanSendMillis = 0;
-
-unsigned long lastCanAttemptMillis = 0;
-const unsigned long canInterval = 1000;
-unsigned long lastAvailabilitySend = 0;
-const unsigned long availabilityInterval = WINDOW_MS;
-
-// Variable de estado para controlar la actualización del display
-bool displayNeedsUpdate = true; // Se inicializa en true para la primera actualización
-
-// Flag para forzar redraw (usado cuando cambio de pantalla con el botón)
+// ------------------------------ variables para manejo de las pantallas -----------------------------------------
+int screenIndex = 0;
+bool displayNeedsUpdate = true;
 volatile bool forceDisplayRedraw = false;
 
+// scroll para lista de nodos
+const int nodesPerPage = 5;
+int nodesStartIndex = 0;
+
+
+// ------------------------------ variables para calculo de potencia ----------------------------------------------
+const float V_MIN = 30.0f;      // tension mínima para cálculo
+double Vrms = 0;
+
+// ADC sampling parameters
+const int sensorPin = 33;       // GPIO33 -> ADC1_CHANNEL_5
+const adc1_channel_t adcChannel = ADC1_CHANNEL_5;
+const adc_atten_t adcAtten = ADC_ATTEN_DB_12;
+const adc_bits_width_t adcWidth = ADC_WIDTH_BIT_12;
+
+// cantidad de muestras a tomar para evitar efecto de ventaneo
+const int Fs = 50000;                    // frecuencia de muestreo (Hz)
+const int lineFreq = 50;
+const int samplesPerPeriod = Fs / lineFreq;
+const int periodsToCapture = 10;         
+const int bufferSize = samplesPerPeriod * periodsToCapture;
+
+static volatile uint16_t adcBuffer[bufferSize];
+static volatile int bufferIndex = 0;
+static volatile bool bufferFull = false;
+static float voltageOffset = 0.0f;       // offset de tensión (se mide en vacío)
+
+hw_timer_t* samplingTimer = nullptr;     // timer para muestreo
+esp_adc_cal_characteristics_t adc_chars;
+              
+
+// ---------------------------------------- declaracion de funciones ----------------------------------------------
 void updateDisplay();
+void macToStr(const uint8_t mac[6], char out[18]);
+void showMainScreen(float availablePower, float V_rms, float availableCurrent, float totalConsumption, int nodeCount, unsigned long messageInterval, const char* lastNodeMac, bool force);
+void showCanScreen(bool canOk, unsigned long canInterval, int consecFailures, bool force);
+void showNodesScreenPaged(int startIndex);
+void handleButtons();
+void purgeStalePeers();
+void setupEspNow();
+void displayMessage(const char* msg, bool clear = true);
+
+
+// ------------------------------------------ ISR y funciones del ADC ----------------------------------------------
+void IRAM_ATTR onTimerCallback() {
+  if (!bufferFull && bufferIndex < bufferSize) {
+    int raw = adc1_get_raw(adcChannel);
+    adcBuffer[bufferIndex] = (uint16_t)raw;
+    bufferIndex = bufferIndex + 1;
+    if (bufferIndex >= bufferSize) {
+      bufferFull = true;
+    }
+  }
+}
+
+void startSampling() {
+  bufferIndex = 0;
+  bufferFull = false;
+  timerAlarmDisable(samplingTimer);
+  timerAlarmWrite(samplingTimer, 1000000UL / Fs, true);
+  timerAlarmEnable(samplingTimer);
+}
+
+void stopSampling() {
+  timerAlarmDisable(samplingTimer);
+}
 
 void macToStr(const uint8_t mac[6], char out[18]) {
   sprintf(out, "%02X:%02X:%02X:%02X:%02X:%02X",
           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
-void displayMessage(const char* msg, bool clear = true) {
+// -------------------------------------------- funciones de pantalla ---------------------------------------------
+void displayMessage(const char* msg, bool clear) {
   if (clear) display.clearDisplay();
   display.setCursor(0, 0);
   display.setTextSize(1);
@@ -89,34 +166,39 @@ void displayMessage(const char* msg, bool clear = true) {
   display.display();
 }
 
-// === Pantalla principal tal como la enviaste, ahora con 'force' seguro ===
-void showMainScreen(float availablePower, float totalConsumption, int nodeCount, unsigned long messageInterval, const char* lastNodeMac, bool force = false) {
-  static float lastTotalConsumption = -1.0;
+// ------------------------------------- pantalla 0: disponibilidad y consumo --------------------------------------
+void showMainScreen(float availablePower, float V_rms, float availableCurrent, float totalConsumption, int nodeCount, unsigned long messageInterval, const char* lastNodeMac, bool force) {
+  static float lastAvailablePower = -1.0f;
+  static float lastV = -1.0f;
+  static float lastI = -1.0f;
+  static float lastTotal = -1.0f;
   static int lastNodeCount = -1;
-  static unsigned long lastMessageInterval = 0;
-  static char lastNodeMacPrinted[18] = "-";
-
-  // seguridad: comparar macs sólo si es válido, y evitar strcmp(NULL,...)
-  bool sameMac = false;
-  if (lastNodeMac) {
-    sameMac = (strcmp(lastNodeMac, lastNodeMacPrinted) == 0);
-  } else {
-    sameMac = (strcmp(lastNodeMacPrinted, "-") == 0);
-  }
+  static unsigned long lastMsgInterval = 0;
+  static char lastMacPrinted[18] = "-";
 
   if (!force) {
-    if (abs(totalConsumption - lastTotalConsumption) < 0.1 && nodeCount == lastNodeCount && messageInterval == lastMessageInterval && sameMac) {
+    if (fabs(availablePower - lastAvailablePower) < 0.1f &&
+        fabs(V_rms - lastV) < 0.01f &&
+        fabs(availableCurrent - lastI) < 0.01f &&
+        fabs(totalConsumption - lastTotal) < 0.1f &&
+        nodeCount == lastNodeCount &&
+        messageInterval == lastMsgInterval &&
+        ((lastNodeMac==nullptr && strcmp(lastMacPrinted,"-")==0) || (lastNodeMac && strcmp(lastNodeMac,lastMacPrinted)==0))) {
       return;
     }
   }
 
-  lastTotalConsumption = totalConsumption;
+  lastAvailablePower = availablePower;
+  lastV = V_rms;
+  lastI = availableCurrent;
+  lastTotal = totalConsumption;
   lastNodeCount = nodeCount;
-  lastMessageInterval = messageInterval;
+  lastMsgInterval = messageInterval;
   if (lastNodeMac) {
-    // asegurar terminación nula
-    strncpy(lastNodeMacPrinted, lastNodeMac, sizeof(lastNodeMacPrinted)-1);
-    lastNodeMacPrinted[sizeof(lastNodeMacPrinted)-1] = '\0';
+    strncpy(lastMacPrinted, lastNodeMac, sizeof(lastMacPrinted)-1);
+    lastMacPrinted[sizeof(lastMacPrinted)-1] = '\0';
+  } else {
+    strcpy(lastMacPrinted,"-");
   }
 
   display.clearDisplay();
@@ -124,108 +206,211 @@ void showMainScreen(float availablePower, float totalConsumption, int nodeCount,
   display.setTextColor(SSD1306_WHITE);
 
   display.setCursor(0, 0);
-  display.printf("Pot. Disp: %.1f W", availablePower);
+  display.printf("Potencia: %.1f W", availablePower);
 
   display.setCursor(0, 10);
-  display.printf("Consumo : %.1f W", totalConsumption);
+  display.printf("Vrms: %.2f V", V_rms);
 
   display.setCursor(0, 20);
-  display.printf("Nodos  : %d", nodeCount);
-
-  display.setCursor(0, 30);
-  display.printf("Ult. msj.: %lums", messageInterval);
+  display.printf("Imax: %.3f A", availableCurrent);
 
   display.setCursor(0, 40);
-  if (lastNodeMac && nodeCount > 0) {
-    display.printf("%s", lastNodeMac);
-  } else {
-    display.printf("Ult nodo: -");
-  }
+  display.printf("Consumo: %.1f A", totalConsumption);
+
   display.display();
 }
 
-// === Pantalla CAN tal como la enviaste, con 'force' ===
-void showCanScreen(bool canOk, unsigned long canInterval, int consecFailures, bool force = false) {
+// --------------------------------------- pantalla 1: comunicacion CAN ---------------------------------------
+void showCanScreen(bool canOk_local, unsigned long canInterval_local, int consecFailures, bool force) {
   static bool lastCanOk = false;
   static unsigned long lastCanInterval = 0;
-  static int lastConsecFailures = -1;
+  static int lastConsec = -1;
 
   if (!force) {
-    if (canOk == lastCanOk && canInterval == lastCanInterval && consecFailures == lastConsecFailures) {
+    if (canOk_local == lastCanOk && canInterval_local == lastCanInterval && consecFailures == lastConsec) {
       return;
     }
   }
 
-  lastCanOk = canOk;
-  lastCanInterval = canInterval;
-  lastConsecFailures = consecFailures;
-  
+  lastCanOk = canOk_local;
+  lastCanInterval = canInterval_local;
+  lastConsec = consecFailures;
+
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
 
-  if (canOk && consecFailures == 0) {
+  display.setCursor(0, 0);
+  if (canOk_local && consecFailures == 0) {
     display.printf("CAN: OK");
-  } else if (!canOk) {
+  } else if (!canOk_local) {
     display.printf("CAN init FAILED!");
   } else {
     display.printf("CAN: FAILED");
   }
 
   display.setCursor(0, 10);
-  display.printf("Fallos de envio: %d", consecFailures);
+  display.printf("Fallos: %d", consecFailures);
 
   display.setCursor(0, 20);
-  if (canInterval == 0) {
-    display.printf("Ult. msj.: -");
-  } else {
-    if (canInterval > 999999UL) canInterval = 999999UL;
-    display.printf("Ult. msj.: %lums", canInterval);
-  }
+  if (canInterval_local == 0) display.printf("Ult. msj: -");
+  else display.printf("Ult. msj: %lums", canInterval_local > 999999UL ? 999999UL : canInterval_local);
 
   display.setCursor(0, 30);
   display.printf("ID envio: 0x603");
-  
+
   display.display();
 }
 
-void handleButton() {
-  bool st = digitalRead(buttonPin);
+// --------------------------------------- pantalla 2: estado de los nodos de Consumo ---------------------------------------
+void showNodesScreenPaged(int startIndex) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(0, 0);
+  display.println("Nodos (scroll):");
+
   unsigned long now = millis();
+  int y = 10;
+  int total = peers.size();
+  int endIdx = min(total, startIndex + nodesPerPage);
+  for (int i = startIndex; i < endIdx; ++i) {
+    char macs[18];
+    macToStr(peers[i].mac, macs);
+    display.setCursor(0, y);
+    display.printf("%.8s", macs); // parte de MAC por espacio
+    display.setCursor(64, y);
+    display.printf("%.1fW", peers[i].power);
+    y += 8;
+    display.setCursor(0, y);
+    unsigned long age = now - peers[i].lastSeen;
+    display.printf("age:%lums pri:%u", age, peers[i].priority);
+    y += 10;
+  }
 
-  if (st != lastButtonState) {
-    // debounce: ignorar cambios si ocurrieron hace menos de debounceMs
-    if (now - lastButtonChange < debounceMs) {
-      lastButtonChange = now;
-      lastButtonState = st;
-      return;
-    }
-    lastButtonChange = now;
-    lastButtonState = st;
+  // indicadores de paginas
+  display.setCursor(0, 56);
+  if (startIndex > 0) display.print("<Prev");
+  display.setCursor(70, 56);
+  if (endIdx < total) display.print("Next>");
 
-    if (st == LOW) {
-      buttonPressedSince = now;
+  display.display();
+}
+
+// --------------------------------------- actualizacion de la pantalla ---------------------------------------
+void updateDisplay() {
+    bool force = forceDisplayRedraw;
+    if (screenIndex == 0) {
+      float totalConsumption = 0;
+      int nodeCount = peers.size();
+      for (auto &p : peers) totalConsumption += p.power;
+      unsigned long messageInterval = 0;
+      if (secondLastMessageTime > 0) messageInterval = lastMessageTime - secondLastMessageTime;
+
+      unsigned long minAge = ULONG_MAX;
+      int idxMinAge = -1;
+      for (int i = 0; i < nodeCount; ++i) {
+          unsigned long age = millis() - peers[i].lastSeen;
+          if (age < minAge) {
+              minAge = age;
+              idxMinAge = i;
+          }
+      }
+      char lastNodeMacStr[18] = "-";
+      if (idxMinAge >= 0) macToStr(peers[idxMinAge].mac, lastNodeMacStr);
+
+      float availablePower = 2200.0f;
+      float availableCurrent = 0.0f;
+      if (Vrms >= V_MIN) availableCurrent = availablePower / Vrms;
+      showMainScreen(availablePower, Vrms, availableCurrent, totalConsumption, nodeCount, messageInterval, (idxMinAge >= 0) ? lastNodeMacStr : nullptr, force);
+    } else if (screenIndex == 1) {
+      showNodesScreenPaged(nodesStartIndex);
     } else {
-      unsigned long held = now - buttonPressedSince;
-      if (held >= longPressMs) {
-        display.clearDisplay();
-        display.setCursor(0, 0);
-        display.setTextSize(1);
-        display.setTextColor(SSD1306_WHITE);
-        display.println("Reiniciando...");
-        display.display();
-        delay(200);
-        ESP.restart();
-      } else {
-        screenIndex = (screenIndex + 1) % 2;
-        displayNeedsUpdate = true;
-        forceDisplayRedraw = true;
+      unsigned long canIntervalLocal = 0;
+      if (secondLastCanSentTime > 0) canIntervalLocal = lastCanSentTime - secondLastCanSentTime;
+      showCanScreen(canInitOk, canIntervalLocal, canConsecFailures, force);
+    }
+    displayNeedsUpdate = false;
+    forceDisplayRedraw = false;
+}
+
+// ---------------------------------------------- manejo de botones ----------------------------------------------------
+void handleButtons() {
+  unsigned long now = millis();
+  // array de referencias para iterar
+  BtnState *buttons[3] = { &btnPrev, &btnNext, &btnHome };
+
+  for (int i = 0; i < 3; ++i) {
+    BtnState* b = buttons[i];
+    bool st = digitalRead(b->pin);
+    if (st != b->lastState) {
+      // cambio de estado: debounce timer
+      if (now - b->lastChange >= debounceMs) {
+        b->lastChange = now;
+        // detect edges
+        if (st == LOW) {
+          // pressed
+          b->pressedSince = now;
+        } else {
+          // released -> short or long
+          unsigned long held = now - b->pressedSince;
+          // acción por botón
+          if (b->pin == btnHome.pin) {
+            if (held >= longPressMs) {
+              // long press: reboot
+              display.clearDisplay();
+              display.setCursor(0, 0);
+              display.setTextSize(1);
+              display.setTextColor(SSD1306_WHITE);
+              display.println("Reiniciando...");
+              display.display();
+              delay(200);
+              ESP.restart();
+            } else {
+              // short press: go to main screen
+              screenIndex = 0;
+              nodesStartIndex = 0;
+              displayNeedsUpdate = true;
+              forceDisplayRedraw = true;
+            }
+          } else if (b->pin == btnNext.pin) {
+            if (screenIndex == 1) {
+              // scroll down in nodes list
+              int total = peers.size();
+              if (total > 0) {
+                nodesStartIndex = min(nodesStartIndex + nodesPerPage, max(0, total - nodesPerPage));
+              }
+              displayNeedsUpdate = true;
+            } else {
+              // change to next screen
+              screenIndex = (screenIndex + 1) % 3;
+              nodesStartIndex = 0;
+              displayNeedsUpdate = true;
+              forceDisplayRedraw = true;
+            }
+          } else if (b->pin == btnPrev.pin) {
+            if (screenIndex == 1) {
+              // scroll up in nodes list
+              if (nodesStartIndex >= nodesPerPage) nodesStartIndex -= nodesPerPage;
+              else nodesStartIndex = 0;
+              displayNeedsUpdate = true;
+            } else {
+              // previous screen
+              screenIndex = (screenIndex + 2) % 3;
+              nodesStartIndex = 0;
+              displayNeedsUpdate = true;
+              forceDisplayRedraw = true;
+            }
+          }
+        }
+        b->lastState = st;
       }
     }
   }
 }
 
+// ---------------------------------------- funciones ESP-NOW -----------------------------------------------------
 void onDataRecv(const uint8_t* mac, const uint8_t* buf, int len) {
   if (len == sizeof(consensus_msg_t)) {
     consensus_msg_t msg;
@@ -238,7 +423,7 @@ void onDataRecv(const uint8_t* mac, const uint8_t* buf, int len) {
     char macs[18];
     sprintf(macs, "%02X:%02X:%02X:%02X:%02X:%02X",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    Serial.printf("recv from %s  power: %.2f  pri:%u\n", macs, msg.power, msg.priority);
+    //Serial.printf("recv from %s  power: %.2f  pri:%u\n", macs, msg.power, msg.priority);
 
     bool peerFound = false;
     for (auto &p : peers) {
@@ -257,25 +442,17 @@ void onDataRecv(const uint8_t* mac, const uint8_t* buf, int len) {
       np.priority = msg.priority;
       np.lastSeen = millis();
       peers.push_back(np);
-    }
-  }
-}
-
-void purgeStalePeers() {
-  unsigned long now = millis();
-  for (int i = (int)peers.size() - 1; i >= 0; --i) {
-    if (now - peers[i].lastSeen > 10 * WINDOW_MS) {
-      peers.erase(peers.begin() + i);
       displayNeedsUpdate = true;
     }
   }
 }
 
 void setupEspNow() {
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP("NodoInformante","12345678");
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+
   if (esp_now_init() != ESP_OK) {
-    Serial.println("Error inicializando ESP-NOW");
+    //Serial.println("Error inicializando ESP-NOW");
     while (true) delay(1000);
   }
   esp_now_register_recv_cb(onDataRecv);
@@ -287,79 +464,127 @@ void setupEspNow() {
   esp_now_add_peer(&peerInfo);
 }
 
+// ---------------------------------------- limpieza de nodos obsoletos -------------------------------------------
+void purgeStalePeers() {
+  unsigned long now = millis();
+  for (int i = (int)peers.size() - 1; i >= 0; --i) {
+    if (now - peers[i].lastSeen > 10 * WINDOW_MS) {
+      peers.erase(peers.begin() + i);
+      displayNeedsUpdate = true;
+      int maxStart = max(0, (int)peers.size() - nodesPerPage);
+      if (nodesStartIndex > maxStart) nodesStartIndex = maxStart;
+    }
+  }
+}
+
+// ---------------------------------------------- setup y loop ------------------------------------------------------
 void setup() {
   Serial.begin(115200);
-  pinMode(buttonPin, INPUT_PULLUP);
-  lastButtonState = digitalRead(buttonPin);
-  lastButtonChange = millis();
+
+  // ADC setup
+  analogSetPinAttenuation(sensorPin, ADC_11db); // matches adcAtten choice
+  adc1_config_width(adcWidth);
+  adc1_config_channel_atten(adcChannel, adcAtten);
+  esp_adc_cal_characterize(ADC_UNIT_1, adcAtten, adcWidth, 1100, &adc_chars);
+
+  // configure timer for ADC sampling (prescaler 80 -> 1 MHz ticks)
+  samplingTimer = timerBegin(0, 80, true);
+  timerAttachInterrupt(samplingTimer, &onTimerCallback, true);
+
+  
+  btnPrev.lastState = digitalRead(btnPrev.pin);
+  btnNext.lastState = digitalRead(btnNext.pin);
+  btnHome.lastState = digitalRead(btnHome.pin);
+  unsigned long now = millis();
+  btnPrev.lastChange = btnNext.lastChange = btnHome.lastChange = now;
+
   Wire.begin();
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("SSD1306 init failed");
+    //Serial.println("SSD1306 init failed");
     while (true);
   }
   display.clearDisplay();
   display.display();
+
   SPI.begin();
   mcp2515.reset();
   if (mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ) != MCP2515::ERROR_OK) {
-    Serial.println("CAN init failed, continuing but CAN disabled");
+    //Serial.println("CAN init failed, continuing but CAN disabled");
     canInitOk = false;
   } else {
     mcp2515.setNormalMode();
     canInitOk = true;
   }
+
   setupEspNow();
+
   lastCanAttemptMillis = millis();
   lastAvailabilitySend = 0;
+
+  // --- ADC: calibración de offset (bloqueante) ---
+  //Serial.println("Calibrando offset: tome señal en reposo...");
+  startSampling();
+  while (!bufferFull) {
+    yield();
+  }
+  stopSampling();
+
+  // convertir raws a mV y promedio (offset en V)
+  uint64_t sum_mV = 0;
+  for (int i = 0; i < bufferIndex; ++i) {
+    uint32_t mV = esp_adc_cal_raw_to_voltage(adcBuffer[i], &adc_chars);
+    sum_mV += mV;
+  }
+  voltageOffset = float(sum_mV) / float(bufferIndex) / 1000.0f;
+  //Serial.printf("Offset calibrado (V): %.5f (sobre %d muestras)\n", voltageOffset, bufferIndex);
+
+  // preparar para muestreo continuo
+  bufferFull = false;
+  bufferIndex = 0;
+  delay(200);
+  startSampling();
+
   updateDisplay();
 }
 
-void updateDisplay() {
-    bool force = forceDisplayRedraw;
-    if (screenIndex == 0) {
-      float totalConsumption = 0;
-      int nodeCount = peers.size();
-      for (auto &p : peers) {
-        totalConsumption += p.power;
-      }
-      unsigned long messageInterval = 0;
-      if (secondLastMessageTime > 0) {
-        messageInterval = lastMessageTime - secondLastMessageTime;
-      }
-      
-      unsigned long minAge = ULONG_MAX;
-      int idxMinAge = -1;
-      for (int i = 0; i < nodeCount; ++i) {
-          unsigned long age = millis() - peers[i].lastSeen;
-          if (age < minAge) {
-              minAge = age;
-              idxMinAge = i;
-          }
-      }
-      char lastNodeMacStr[18] = "-";
-      if (idxMinAge >= 0) {
-          macToStr(peers[idxMinAge].mac, lastNodeMacStr);
-      }
-      showMainScreen(200.0f, totalConsumption, nodeCount, messageInterval, (idxMinAge >= 0) ? lastNodeMacStr : nullptr, force);
-    } else {
-      unsigned long canInterval = 0;
-      if (secondLastCanSentTime > 0) {
-        canInterval = lastCanSentTime - secondLastCanSentTime;
-      }
-      showCanScreen(canInitOk, canInterval, canConsecFailures, force);
-    }
-    displayNeedsUpdate = false;
-    forceDisplayRedraw = false;
-}
 
 void loop() {
-  handleButton();
+  handleButtons();
   unsigned long now = millis();
 
-  // 1) send availability at availabilityInterval
+  // ---------- ADC: process bufferFull to compute Vrms ----------
+  if (bufferFull) {
+    stopSampling();
+    // calcular Vrms sobre bufferSize muestras
+    double sumsq = 0.0;
+    for (int i = 0; i < bufferSize; ++i) {
+      uint32_t mV = esp_adc_cal_raw_to_voltage(adcBuffer[i], &adc_chars);
+      double V = double(mV) / 1000.0;
+      double Vcorr = V - voltageOffset;
+      sumsq += Vcorr * Vcorr;
+    }
+    Vrms = sqrt(sumsq / double(bufferSize));
+    Vrms = Vrms*940;
+
+    // reiniciar muestreo
+    bufferIndex = 0;
+    bufferFull = false;
+    startSampling();
+    displayNeedsUpdate = true; // new measurement -> update UI
+  }
+  // ---------- end ADC processing ----------`
+
+  // 1) send availability at availabilityInterval (we now send availableCurrent)
   if (now - lastAvailabilitySend >= availabilityInterval) {
-    float availablePower = 200;
-    availability_msg_t a = { availablePower };
+    float availablePower = 2200.0f; // W (reemplazar por valor recibido por CAN en futuro)
+    float availableCurrent = 0.0f;
+    if (Vrms >= V_MIN && availablePower > 0.0f) {
+      availableCurrent = availablePower / Vrms;
+    } else {
+      availableCurrent = 0.0f;
+    }
+
+    availability_msg_t a = { availableCurrent };
     esp_now_send(broadcastAddress, (uint8_t*)&a, sizeof(a));
     lastAvailabilitySend = now;
   }
@@ -367,18 +592,14 @@ void loop() {
   // 2) purge peers and compute totals
   purgeStalePeers();
 
-  // 3) update display only when a change has been marked
-  if (displayNeedsUpdate) {
-    updateDisplay();
-  }
+  // 3) update display only when needed
+  if (displayNeedsUpdate) updateDisplay();
 
   // 4) CAN send every canInterval (no-blocking, reintento y recovery)
   if (now - lastCanAttemptMillis >= canInterval) {
     lastCanAttemptMillis = now;
     float totalConsumption = 0;
-    for (auto &p : peers) {
-      totalConsumption += p.power;
-    }
+    for (auto &p : peers) totalConsumption += p.power;
 
     uint32_t totalConsumption_as_int = static_cast<uint32_t>(totalConsumption * 100);
     canMsg.can_id = 0x603;
@@ -398,14 +619,14 @@ void loop() {
           secondLastCanSentTime = lastCanSentTime;
           lastCanSentTime = millis();
           canConsecFailures = 0;
-          Serial.printf("CAN send OK  total(centis): %lu  retries:%d\n", (unsigned long)totalConsumption_as_int, retries);
+          //Serial.printf("CAN send OK  total(centis): %lu  retries:%d\n", (unsigned long)totalConsumption_as_int, retries);
           displayNeedsUpdate = true; // Forzar actualización de pantalla CAN (éxito)
         } else {
           retries++;
-          Serial.printf("CAN send fail, retry %d\n", retries);
+          //Serial.printf("CAN send fail, retry %d\n", retries);
           struct can_frame tmp;
           if (mcp2515.readMessage(&tmp) == MCP2515::ERROR_OK) {
-            Serial.println("Flushed one incoming CAN frame after failed send");
+            //Serial.println("Flushed one incoming CAN frame after failed send");
           }
           delay(5);
         }
@@ -413,30 +634,29 @@ void loop() {
 
       if (!messageSent) {
         canConsecFailures++;
-        Serial.printf("CAN send: final failure after retries, consecFails=%d\n", canConsecFailures);
-        // <<-- CORRECCIÓN: marcar para actualizar la pantalla en cada incremento de fallos
+        //Serial.printf("CAN send: final failure after retries, consecFails=%d\n", canConsecFailures);
         displayNeedsUpdate = true;
       }
 
       if (canConsecFailures >= CAN_RESET_THRESHOLD) {
-        Serial.println("MCP2515: too many consecutive failures -> resetting MCP2515 and reconfiguring...");
+        //Serial.println("MCP2515: too many consecutive failures -> resetting MCP2515 and reconfiguring...");
         mcp2515.reset();
         delay(5);
         if (mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ) == MCP2515::ERROR_OK) {
           mcp2515.setNormalMode();
           canInitOk = true;
           canConsecFailures = 0;
-          Serial.println("MCP2515 reinit OK (8MHz).");
+          //Serial.println("MCP2515 reinit OK (8MHz).");
         } else {
-          Serial.println("MCP2515 reinit failed with 8MHz, trying 16MHz...");
+          //Serial.println("MCP2515 reinit failed with 8MHz, trying 16MHz...");
           if (mcp2515.setBitrate(CAN_500KBPS, MCP_16MHZ) == MCP2515::ERROR_OK) {
             mcp2515.setNormalMode();
             canInitOk = true;
             canConsecFailures = 0;
-            Serial.println("MCP2515 reinit OK (16MHz).");
+            //Serial.println("MCP2515 reinit OK (16MHz).");
           } else {
             canInitOk = false;
-            Serial.println("MCP2515 reinit FAILED (both 8MHz and 16MHz). CAN disabled.");
+            //Serial.println("MCP2515 reinit FAILED (both 8MHz and 16MHz). CAN disabled.");
           }
         }
         displayNeedsUpdate = true; // Forzar actualización si hay un fallo y reintento
@@ -445,26 +665,24 @@ void loop() {
       static unsigned long lastManualReinitAttempt = 0;
       if (now - lastManualReinitAttempt > 5000) {
         lastManualReinitAttempt = now;
-        Serial.println("Attempting MCP2515 init (periodic retry)...");
+        //Serial.println("Attempting MCP2515 init (periodic retry)...");
         mcp2515.reset();
         delay(5);
         if (mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ) == MCP2515::ERROR_OK) {
           mcp2515.setNormalMode();
           canInitOk = true;
           canConsecFailures = 0;
-          Serial.println("MCP2515 init OK (8MHz).");
+          //Serial.println("MCP2515 init OK (8MHz).");
         } else if (mcp2515.setBitrate(CAN_500KBPS, MCP_16MHZ) == MCP2515::ERROR_OK) {
           mcp2515.setNormalMode();
           canInitOk = true;
           canConsecFailures = 0;
-          Serial.println("MCP2515 init OK (16MHz).");
+          //Serial.println("MCP2515 init OK (16MHz).");
         } else {
-          Serial.println("MCP2515 still not responding on periodic retry.");
+          //Serial.println("MCP2515 still not responding on periodic retry.");
         }
-        displayNeedsUpdate = true; // Forzar actualización si se intenta una re-inicialización
+        displayNeedsUpdate = true;
       }
     }
   }
-
-  //delay(10);
 }
