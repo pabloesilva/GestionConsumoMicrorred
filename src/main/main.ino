@@ -68,11 +68,11 @@ const int periodsToCapture = 10;
 const int bufferSize = samplesPerPeriod * periodsToCapture;
 
 // Buffers y flags
-static volatile uint16_t adcBuffer[bufferSize];
-static volatile int bufferIndex = 0;
-static volatile bool bufferFull = false;
+static uint16_t adcBuffer[bufferSize];
+static int bufferIndex = 0;
+static bool bufferFull = false;
 static float voltageOffset = 0.0f;
-
+bool firstMeasure = true;
 //parármetros del ADC continuo
 uint8_t adc_pins[] = {sensorPin}; 
 uint8_t adc_pins_count = 1;
@@ -153,8 +153,8 @@ void onDataRecv(const esp_now_recv_info_t * info, const uint8_t* buf, int len) {
     memcpy(&msg_disp, buf, len);
 
     // definimos la franja de cada led
-    const float maxCurrent = 2200.0f;
-    const float segment = maxCurrent / 6.0f;  // ~366.67 W por led
+    const float maxCurrent = 10.0f;
+    const float segment = maxCurrent / 6.0f;  // ~1.67 A por led
 
     // calculamos cuantos se deben encender
     int ledsOn = int(msg_disp.availableCurrent / segment + 0.0001f);
@@ -330,8 +330,8 @@ void setup() {
   }
   digitalWrite(rele,HIGH);
 
-  // iniciar la conversión continua del ADC
-  analogContinuousStart();
+  // // iniciar la conversión continua del ADC
+  // analogContinuousStart();
 }
 
 
@@ -341,7 +341,11 @@ void loop() {
 
   // primer clausula, chequear si el circuito esta activo consumiendo corriente
   if (digitalRead(rele)){
-
+    if (firstMeasure){
+      delay(5000);
+      firstMeasure = false;
+      analogContinuousStart();
+    }
     // finalizacion de la conversion, se detiene el muestreo continuo
     if (adc_coversion_done){
       adc_coversion_done = false;
@@ -388,7 +392,7 @@ void loop() {
       purgeStalePeers();
 
       // 5) calcular potencia total (suma de todos los nodos)
-      totalCurrent = current;
+      totalCurrent = currentRMS;
       for (auto &p : peers) {
         totalCurrent += p.current;
       }
@@ -436,6 +440,7 @@ void loop() {
       analogContinuousStart();
     }
   }else{
+    firstMeasure = true;
     //se vuelve a calcular la potencia con el ultimo dato de consumo mas un 5%
     totalCurrent = 1.05*lastCurrent;
     for (auto &p : peers) {
