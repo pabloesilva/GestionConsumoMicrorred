@@ -370,15 +370,15 @@ void loop() {
       }
       float Vrms = sqrt(sumsq / bufferSize);      // promedio sobre cantidad de muestras y raiz para obtener valor eficaz (RMS) discreto 
       
-      // Vrms = Vrms - 0.0135;                    // umbral de ruido inherente al sensor
-      // Vrms = (Vrms < 0.0005) ? 0 : Vrms;       // ventana de histeresis para valores muy pequeños
+      // Vrms = Vrms - 0.005;                    // umbral de ruido inherente al sensor
+      // Vrms = (Vrms < 0.005) ? 0 : Vrms;       // ventana de histeresis para valores muy pequeños
       
       float currentRMS = Vrms / sensibility;      // convertir valor en tension a corriente
       // float power = voltageRMS * currentRMS;      // calculo de potencia aparente
       
       // mostrar valores calculados  por consola
       // Serial.printf("%.4f, %.4f, %.4f\n", Vrms, currentRMS, power);
-      Serial.printf("%.4f, %.4f, %.4f\n", Vrms, currentRMS);
+      Serial.printf("Vrms: %.4f, Arms: %.4f\n", Vrms, currentRMS);
       // Serial.printf("Valor rele: %d \n", digitalRead(rele));
 
       // enviar mensaje de consumo a los demas nodos de consumo
@@ -399,7 +399,7 @@ void loop() {
 
       // 6) mostrar estado por consola 
       Serial.printf(
-        "nodosActivos: %d  consumoTotal: %.2f W\n", 
+        "nodosActivos: %d  consumoTotal: %.2f A\n", 
         peers.size() + 1,     // +1 = este nodo
         totalCurrent
       );
