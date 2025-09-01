@@ -59,7 +59,7 @@ const int ledPins[6] = {
 
 // Constantes de Cálculo
 // const float voltageRMS = 220.0f;
-const float sensibility = 0.07f;
+const float sensibility = 0.072f;
 const float lineFreq = 50;
 const int Fs = 50000;
 const int samplesPerPeriod = Fs / lineFreq;
@@ -342,7 +342,7 @@ void loop() {
   // primer clausula, chequear si el circuito esta activo consumiendo corriente
   if (digitalRead(rele)){
       if (firstMeasure){
-        delay(5000);
+        delay(1000);
         firstMeasure = false;
         analogContinuousStart();
     }
@@ -371,14 +371,14 @@ void loop() {
       float Vrms = sqrt(sumsq / bufferSize);      // promedio sobre cantidad de muestras y raiz para obtener valor eficaz (RMS) discreto 
       
       // Vrms = Vrms - 0.0135;                    // umbral de ruido inherente al sensor
-      // Vrms = (Vrms < 0.0005) ? 0 : Vrms;       // ventana de histeresis para valores muy pequeños
+      Vrms = (Vrms < 0.018) ? 0 : Vrms;       // ventana de histeresis para valores muy pequeños
       
       float currentRMS = Vrms / sensibility;      // convertir valor en tension a corriente
       // float power = voltageRMS * currentRMS;      // calculo de potencia aparente
       
       // mostrar valores calculados  por consola
       // Serial.printf("Tension RMS: %.4f, Corriente RMS %.4f, %.4f\n", Vrms, currentRMS, power);
-      Serial.printf("Tension RMS: %.4f, Corriente RMS %.4f, %.4f\n", Vrms, currentRMS);
+      Serial.printf("Vrms: %.4f, Arms: %.4f\n", Vrms, currentRMS);
       // Serial.printf("Valor rele: %d \n", digitalRead(rele));
 
       // enviar mensaje de consumo a los demas nodos de consumo
@@ -399,41 +399,42 @@ void loop() {
 
       // 6) mostrar estado por consola 
       Serial.printf(
-        "nodosActivos: %d  consumoTotal: %.2f W\n", 
+        "nodosActivos: %d  consumoTotal: %.2f A\n", 
         peers.size() + 1,     // +1 = este nodo
         totalCurrent
       );
-
-      // 7) conexion/desconexion cargas
-      if (totalCurrent > msg_disp.availableCurrent) {                   // primero chequear si el consumo supera la potencia disponible
-        uint8_t minPriority = 1;                                    // se establece como base la prioridad no critica mas alta
-        uint8_t samePriority = 0;                                   // tambien un contador si coincide la criticidad de uno o mas nodos 
-        for (auto &p : peers) {                                     // se recorre la lista de peers y se actualiza a cual posee la prioridad minima
-          if (p.priority > minPriority) {
-            minPriority = p.priority;
-            if(p.priority == myPriority){                   
-              samePriority++;                                       // se incrementa el contador si existen varios nodos con la misma prioridad 
-            }
-          }
-        }
-        
-        if (minPriority < myPriority){                              // por ultimo se chequea si la menor prioridad se corresponde a este
-          minPriority = myPriority;
-        }
-
-        // decidir si este nodo se debe desconectar
-        if (myPriority == minPriority) {                            // verificar si la prioridad de este nodo es la menor
-          if(samePriority){                                         // si hay más de un nodo con la misma prioridad 
-            for (auto &p : peers){
-              if(p.priority == myPriority && p.current > currentRMS){      // si tiene la misma prioridad y el consumo es el menor
-                lastCurrent = currentRMS;                                  // guardar el ultimo consumo para la reconexión
-                digitalWrite(rele, LOW);                            // desconectar esta carga
+      if(!(myPriority == 0)){
+        // 7) conexion/desconexion cargas
+        if (totalCurrent > msg_disp.availableCurrent) {                   // primero chequear si el consumo supera la potencia disponible
+          uint8_t minPriority = 1;                                    // se establece como base la prioridad no critica mas alta
+          uint8_t samePriority = 0;                                   // tambien un contador si coincide la criticidad de uno o mas nodos 
+          for (auto &p : peers) {                                     // se recorre la lista de peers y se actualiza a cual posee la prioridad minima
+            if (p.priority > minPriority) {
+              minPriority = p.priority;
+              if(p.priority == myPriority){                   
+                samePriority++;                                       // se incrementa el contador si existen varios nodos con la misma prioridad 
               }
             }
           }
-          else{                                                     // si no hay otro nodo con la misma prioridad
-            lastCurrent = currentRMS;
-            digitalWrite(rele, LOW);                                // desconectar esta carga
+          
+          if (minPriority < myPriority){                              // por ultimo se chequea si la menor prioridad se corresponde a este
+            minPriority = myPriority;
+          }
+
+          // decidir si este nodo se debe desconectar
+          if (myPriority == minPriority) {                            // verificar si la prioridad de este nodo es la menor
+            if(samePriority){                                         // si hay más de un nodo con la misma prioridad 
+              for (auto &p : peers){
+                if(p.priority == myPriority && p.current > currentRMS){      // si tiene la misma prioridad y el consumo es el menor
+                  lastCurrent = currentRMS;                                  // guardar el ultimo consumo para la reconexión
+                  digitalWrite(rele, LOW);                            // desconectar esta carga
+                }
+              }
+            }
+            else{                                                     // si no hay otro nodo con la misma prioridad
+              lastCurrent = currentRMS;
+              digitalWrite(rele, LOW);                                // desconectar esta carga
+            }
           }
         }
       }
