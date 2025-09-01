@@ -88,6 +88,10 @@ int nodesStartIndex = 0;
 // ------------------------------ variables para calculo de potencia ----------------------------------------------
 const float V_MIN = 30.0f;
 double Vrms = 0;
+float availablePower = 2200.0f;
+unsigned long time_perfil = millis();
+int i = 0;
+int count = 0;
 
 // ADC sampling parameters
 const int sensorPin = 33;
@@ -313,7 +317,7 @@ void updateDisplay() {
       char lastNodeMacStr[18] = "-";
       if (idxMinAge >= 0) macToStr(peers[idxMinAge].mac, lastNodeMacStr);
 
-      float availablePower = 2200.0f;
+      // float availablePower = 2200.0f;
       float availableCurrent = 0.0f;
       if (Vrms >= V_MIN && availablePower > 0.0f) {
         availableCurrent = availablePower / Vrms;
@@ -538,11 +542,14 @@ void setup() {
   startSampling();
 
   updateDisplay();
+   
 }
 
 void loop() {
+  float power_perfil[3] = {2200.0,700.0,1550.0};
+
   unsigned long now = millis();
-  
+
   // Manejo de botones con flags y lógica fuera de ISR
   checkButtons();
 
@@ -569,7 +576,14 @@ void loop() {
 
   // 1) send availability at availabilityInterval (we now send availableCurrent)
   if (now - lastAvailabilitySend >= availabilityInterval) {
-    float availablePower = 2200.0f;
+    
+    if (millis() - time_perfil >= 30000) {
+        time_perfil = millis(); 
+        count++;
+        i = count%3;
+        availablePower = power_perfil[i];
+      }
+    
     float availableCurrent = 0.0f;
     if (Vrms >= V_MIN && availablePower > 0.0f) {
       availableCurrent = availablePower / Vrms;
