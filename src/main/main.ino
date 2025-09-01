@@ -32,7 +32,7 @@ struct PeerData {
   unsigned long lastSeen;
 };  
 
-// almacenamiento de potencias recibidas
+// almacenamiento de corrientes recibidas
 static std::vector<PeerData> peers;
 
 // ventana de recepción en milisegundos
@@ -441,6 +441,9 @@ void loop() {
       analogContinuousStart();
     }
   }else{
+    // 4) purgar peers inactivos
+    purgeStalePeers();
+    firstMeasure = true;
     //se vuelve a calcular la potencia con el ultimo dato de consumo mas un 5%
     totalCurrent = 1.05*lastCurrent;
     for (auto &p : peers) {
