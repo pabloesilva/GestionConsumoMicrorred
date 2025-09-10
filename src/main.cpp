@@ -213,7 +213,7 @@ void showMainScreen(float availablePower, float V_rms, float availableCurrent, f
   display.printf("Imax: %.3f A", availableCurrent);
 
   display.setCursor(0, 40);
-  display.printf("Consumo: %.1f A", totalConsumption);
+  display.printf("Consumo: %.4f A", totalConsumption);
 
   display.display();
 }
