@@ -546,7 +546,7 @@ void setup() {
 }
 
 void loop() {
-  float power_perfil[3] = {2200.0,700.0,1550.0};
+  float power_perfil[3] = {4400.0,3300.0,2200.0};
 
   unsigned long now = millis();
 
