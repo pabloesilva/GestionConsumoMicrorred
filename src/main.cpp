@@ -564,7 +564,7 @@ void loop() {
       sumsq += Vcorr * Vcorr;
     }
     Vrms = sqrt(sumsq / double(bufferSize));
-    Vrms = Vrms*940;
+    Vrms = Vrms*998;
 
     // reiniciar muestreo
     bufferIndex = 0;
