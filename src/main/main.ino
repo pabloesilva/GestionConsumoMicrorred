@@ -371,7 +371,7 @@ void loop() {
       float Vrms = sqrt(sumsq / bufferSize);      // promedio sobre cantidad de muestras y raiz para obtener valor eficaz (RMS) discreto 
       
       // Vrms = Vrms - 0.005;                    // umbral de ruido inherente al sensor
-      Vrms = (Vrms < 0.018) ? 0 : Vrms;       // ventana de histeresis para valores muy pequeños
+      // Vrms = (Vrms < 0.018) ? 0 : Vrms;       // ventana de histeresis para valores muy pequeños
       
       float currentRMS = Vrms / sensibility;      // convertir valor en tension a corriente
       // float power = voltageRMS * currentRMS;      // calculo de potencia aparente
