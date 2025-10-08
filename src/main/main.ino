@@ -1,11 +1,25 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
 #include <esp_now.h>
 #include <WiFi.h>
 #include <vector>
-#include <driver/gpio.h>
-#include <esp_timer.h>           // para temporizador de alta precisión
+#include <cmath>
 
 #define CONVERSIONS_PER_PIN 3
 
+// ------------------- OLED CONFIG -------------------
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 32
+#define OLED_RESET    -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// I2C pins (ESP32)
+const int I2C_SDA = 21;
+const int I2C_SCL = 22;
+
+// ------------------- REDES / MENSAJES -------------------
 // direccion broadcast para ESP-NOW
 static uint8_t broadcastAddress[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
@@ -43,22 +57,8 @@ const int sensorPin = 34;                       // GPIO34 -> ADC1_CHANNEL_6
 const int Interruptor0 = 26;
 const int Interruptor1 = 14;
 const int rele = 33;
-const int ledRojo1 = 15, ledRojo2 = 4;
-const int ledAmarillo1 = 5, ledAmarillo2 = 19;
-const int ledVerde1 = 22, ledVerde2 = 23;
-
-// array con los pines en orden
-const int ledPins[6] = {
-  ledRojo1,
-  ledRojo2,
-  ledAmarillo1,
-  ledAmarillo2,
-  ledVerde1,
-  ledVerde2
-};
 
 // Constantes de Cálculo
-// const float voltageRMS = 220.0f;
 const float sensibility = 0.072f;
 const float lineFreq = 50;
 const int Fs = 50000;
@@ -73,7 +73,7 @@ static volatile bool bufferFull = false;
 static float voltageOffset = 0.0f;
 bool firstMeasure = true;
 
-//parármetros del ADC continuo
+// parámetros del ADC continuo
 uint8_t adc_pins[] = {sensorPin}; 
 uint8_t adc_pins_count = 1;
 volatile bool adc_coversion_done = false;
@@ -83,68 +83,184 @@ void ARDUINO_ISR_ATTR adcComplete() {
   adc_coversion_done = true;
 }
 
-// timers para parpadear led ante una disponibilidad menor a la minima para encender 1 led
-static esp_timer_handle_t pulsePeriodTimer = nullptr; // periodic: inicia pulso
-static esp_timer_handle_t pulseOffTimer = nullptr;    // one-shot: apaga pulso
-// parametros globales para los dos pulsos
-static uint32_t pulsePeriodMs_global = 1500; // period between pulses
-static uint32_t pulseWidthMs_global  = 100;  // pulse width
-// callback one-shot: apaga el led (se ejecuta en contexto de timer task)
-void IRAM_ATTR onPulseOff(void* arg) {
-  gpio_set_level((gpio_num_t)ledRojo1, 0);
-}
-// callback periodico: enciende el led y arma el one-shot para apagarlo
-void IRAM_ATTR onPulsePeriod(void* arg) {
-  // encender led inmediatamente
-  gpio_set_level((gpio_num_t)ledRojo1, 1);
-  // arrancar timer one-shot para apagar
-  if (pulseOffTimer) {
-    uint64_t off_us = (uint64_t)pulseWidthMs_global * 1000ULL;
-    esp_timer_start_once(pulseOffTimer, off_us);
-  }
-}
-// crea timers si no existen aun
-void setupPulseTimers() {
-  if (pulsePeriodTimer && pulseOffTimer) return;
-  const esp_timer_create_args_t off_args = {
-    .callback = &onPulseOff,
-    .arg = nullptr,
-    .dispatch_method = ESP_TIMER_TASK,
-    .name = "pulse_off"
-  };
-  esp_timer_create(&off_args, &pulseOffTimer);
-  const esp_timer_create_args_t period_args = {
-    .callback = &onPulsePeriod,
-    .arg = nullptr,
-    .dispatch_method = ESP_TIMER_TASK,
-    .name = "pulse_period"
-  };
-  esp_timer_create(&period_args, &pulsePeriodTimer);
-}
-// inicia parpadeo en modo pulso: period_ms = 1500, pulse_ms = ancho del pulso
-void startPulseBlink(uint32_t period_ms = 1500, uint32_t pulse_ms = 100) {
-  setupPulseTimers();
-  pulsePeriodMs_global = period_ms;
-  pulseWidthMs_global  = pulse_ms;
-  // asegurar led apagado antes de arrancar
-  gpio_set_level((gpio_num_t)ledRojo1, 0);
-  // arrancar timer periodico (microsegundos)
-  uint64_t period_us = (uint64_t)period_ms * 1000ULL;
-  esp_timer_start_periodic(pulsePeriodTimer, period_us);
-}
-// detiene parpadeo
-void stopPulseBlink() {
-  if (pulsePeriodTimer) esp_timer_stop(pulsePeriodTimer);
-  if (pulseOffTimer) esp_timer_stop(pulseOffTimer);
-  // asegurar estado apagado
-  gpio_set_level((gpio_num_t)ledRojo1, 0);
-}
+// ---------- DISPLAY PULSE (controlado desde loop con millis) ----------
+volatile bool displayPulseActive = false;
+uint32_t displayPulsePeriodMs = 1500;
+uint32_t displayPulseWidthMs  = 100;
+volatile int displayLedsOn = 0; // cantidad visual en pantalla (0..divisions)
+const float displayMaxA = 10.0f; // escala 0..10 A
+const int displayDivisions = 12; // más divisiones que los 6 LEDs físicos
 
+// mensajes de disponibilidad actuales
 availability_msg_t msg_disp; //variable global con el mensaje de disponibilidad
 
-// callback de recepción ESP-NOW
+// variable para mostrar consumo local en la pantalla (actualizada cuando se mide)
+float lastMeasuredCurrent = 0.0f;
+
+// ------- pantalla / alternancia -------
+unsigned long lastScreenSwitch = 0;
+const uint32_t screenSwitchInterval = 5000; // 5 segundos
+int screenMode = 0; // 0 = mostrar disponibilidad (barra + valor abajo), 1 = mostrar consumo grande
+
+// ----------------- WRAPPERS / INTERFAZ DE INDICADORES -----------------
+// Inicializa display
+void indicatorsInit() {
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(100000); // 100kHz por compatibilidad
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("Error: SSD1306 no inicializado");
+  } else {
+    display.clearDisplay();
+    display.display();
+  }
+}
+
+// Secuencia de prueba usada en calibración (solo display)
+void indicatorsTestSequence() {
+  // display: mensaje y barra llena momentánea
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0,0);
+  display.println("Calibrando offset...");
+  // dibujar barra completa (ligeramente ajustada)
+  int x = 8, y = 12, w = SCREEN_WIDTH - 16, h = 12;
+  display.drawRect(x, y, w, h, SSD1306_WHITE);
+  display.fillRect(x+2, y+2, w-4, h-4, SSD1306_WHITE);
+  display.display();
+
+  delay(800);
+
+  // limpiar display
+  display.clearDisplay();
+  display.display();
+}
+
+// Mostrar cantidad proporcional (0..displayDivisions) en pantalla
+void indicatorsShowCountDisplay(int ledsOn) {
+  displayLedsOn = ledsOn;
+}
+
+// limpiar display (barra)
+void indicatorsClearDisplay() {
+  displayLedsOn = 0;
+  display.clearDisplay();
+  display.display();
+}
+
+// iniciar/detener "parpadeo de baja disponibilidad" (solo display)
+void startPulseBlink(uint32_t period_ms = 1500, uint32_t pulse_ms = 100) {
+  displayPulseActive = true;
+  displayPulsePeriodMs = period_ms;
+  displayPulseWidthMs = pulse_ms;
+}
+void stopPulseBlink() {
+  displayPulseActive = false;
+}
+
+// ----------------- DISPLAY DRAW FUNCTION -----------------
+// Dibuja la "batería" con escala 0..displayMaxA y las divisiones
+// Muestra el valor de disponibilidad debajo de la barra cuando screenMode == 0
+// Cuando screenMode == 1 borra la barra y muestra el consumo en fuente grande
+void displayUpdate() {
+  // alternar modo si corresponde
+  unsigned long now = millis();
+  if (now - lastScreenSwitch >= screenSwitchInterval) {
+    lastScreenSwitch = now;
+    screenMode = (screenMode + 1) % 2;
+  }
+
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  if (screenMode == 0) {
+    // --- Pantalla Disponibilidad: barra + valor debajo ---
+    display.setTextSize(1);
+    // texto escala a la izquierda y derecha (arriba)
+    display.setCursor(0, 0);
+    display.print("0A");
+    display.setCursor(SCREEN_WIDTH - 20, 0);
+    display.print(String(displayMaxA,0) + "A");
+
+    // Calculamos la barra (ajustada: x reducido a 8, w = screen -16)
+    int x = 8;
+    int y = 10; // small shift up
+    int w = SCREEN_WIDTH - 16;
+    int h = 12;
+
+    // Dibujar marco de "bateria"
+    display.drawRect(x, y, w, h, SSD1306_WHITE);
+
+    // Divisiones
+    int div = displayDivisions;
+    int innerW = w - 4;
+    int innerH = h - 4;
+    int startX = x + 2;
+    int startY = y + 2;
+    for (int i = 0; i <= div; ++i) {
+      int dx = startX + (i * innerW) / div;
+      display.drawFastVLine(dx, startY, innerH, SSD1306_WHITE);
+    }
+
+    // Relleno según displayLedsOn (viene de msg_disp)
+    int fillSegments = displayLedsOn;
+    if (fillSegments < 0) fillSegments = 0;
+    if (fillSegments > div) fillSegments = div;
+
+    // pulso de baja disponibilidad
+    bool showFill = true;
+    if (displayPulseActive) {
+      uint32_t ms = millis() % displayPulsePeriodMs;
+      showFill = (ms < displayPulseWidthMs);
+    }
+
+    if (fillSegments > 0 && showFill) {
+      int fillW = (innerW * fillSegments) / div;
+      display.fillRect(startX, startY, fillW, innerH, SSD1306_WHITE);
+    } else if (!showFill && displayPulseActive) {
+      // mostrar mensaje de no disponible en lugar de relleno
+      display.setTextSize(1);
+      display.setCursor(0, startY + innerH + 2);
+      display.print("!! NO DISPONIBLE !!");
+      display.display();
+      return;
+    }
+
+    // abajo de la barra mostramos el valor real de disponibilidad (msg_disp)
+    display.setTextSize(1);
+    int yText = startY + innerH + 3;
+    display.setCursor(48, yText);
+    display.print(String(msg_disp.availableCurrent, 2));
+    display.print(" A");
+
+    display.display();
+  } else {
+    // --- Pantalla Consumo: limpiar y mostrar consumo local en grande ---
+    display.clearDisplay();
+    // Mostrar etiqueta pequeña arriba
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print("Consumo:");
+
+    // Mostrar consumo en grande (centrado)
+    // Para 128x32 con setTextSize(2) el texto puede ocupar; usamos 2 y ajustamos posición
+    display.setTextSize(2);
+    String s = String(lastMeasuredCurrent, 2) + "A";
+    // calcular ancho aproximado: cada char aprox 6 pixels * textsize
+    int charW = 6 * 2; // approx
+    int textW = s.length() * charW;
+    int xText = (SCREEN_WIDTH - textW) / 2;
+    int yText = 15; // vertical position
+    if (xText < 0) xText = 0;
+    display.setCursor(xText, yText);
+    display.print(s);
+
+    display.display();
+  }
+}
+
+// ----------------- CALLBACK ESP-NOW -----------------
 void onDataRecv(const esp_now_recv_info_t * info, const uint8_t* buf, int len) {
-  
   uint8_t mac[6]; //dirrecion mac (id unica) que identifica a cada esp32
   memcpy(mac, info->src_addr, 6);
 
@@ -152,25 +268,23 @@ void onDataRecv(const esp_now_recv_info_t * info, const uint8_t* buf, int len) {
   if (len == sizeof(availability_msg_t)) {
     memcpy(&msg_disp, buf, len);
 
-    // definimos la franja de cada led
-    const float maxCurrent = 10.0f;
-    const float segment = maxCurrent / 6.0f;  // ~1.66 A por led
+    // definimos la franja para la pantalla (usamos displayDivisions)
+    const float maxCurrent = displayMaxA; // 10.0
+    const float segment = maxCurrent / float(displayDivisions);
 
-    // calculamos cuantos se deben encender
+    // calculamos cuantos segmentos se deben encender en la pantalla
     int ledsOn = int(msg_disp.availableCurrent / segment + 0.0001f);
-    if (ledsOn > 6) ledsOn = 6;
+    if (ledsOn > displayDivisions) ledsOn = displayDivisions;
     if (ledsOn < 0) ledsOn = 0;
 
     if (ledsOn == 0) {
-      // activar modo parpadeo: apagar todos los leds y arrancar pulse blink
-      for (int i = 0; i < 6; ++i) digitalWrite(ledPins[i], LOW);
-      startPulseBlink(1500, 100); // pulso corto cada 1.5s, ancho 100ms
+      // activar modo parpadeo en display
+      indicatorsClearDisplay();
+      startPulseBlink(displayPulsePeriodMs, displayPulseWidthMs);
     } else {
       // desactivar parpadeo si estaba activo y mostrar estado proporcional
       stopPulseBlink();
-      for (int i = 0; i < 6; ++i) {
-        digitalWrite(ledPins[i], (i < ledsOn) ? HIGH : LOW);
-      }
+      indicatorsShowCountDisplay(ledsOn);
     }
     return;
   }
@@ -201,7 +315,7 @@ void onDataRecv(const esp_now_recv_info_t * info, const uint8_t* buf, int len) {
 // funcion para purgar peers que no hayan enviado en más tiempo que la ventana establecida (WINDOW_MS)
 void purgeStalePeers() {
   unsigned long now = millis();
-  for (int i = peers.size() - 1; i >= 0; --i) {
+  for (int i = (int)peers.size() - 1; i >= 0; --i) {
     if (now - peers[i].lastSeen > WINDOW_MS) {
       peers.erase(peers.begin() + i);
     }
@@ -231,20 +345,14 @@ uint8_t myPriority;
 void setup() {
   Serial.begin(115200);
 
-  // configurar pines
+  // config pines sensor y switches
   pinMode(sensorPin, INPUT);
   pinMode(Interruptor0, INPUT);
   pinMode(Interruptor1, INPUT);
   pinMode(rele, OUTPUT);
-  pinMode(ledRojo1, OUTPUT);
-  pinMode(ledRojo2, OUTPUT);
-  pinMode(ledAmarillo1, OUTPUT);
-  pinMode(ledAmarillo2, OUTPUT);
-  pinMode(ledVerde1, OUTPUT);
-  pinMode(ledVerde2, OUTPUT);
-  
-  // configurar timers para parpadeo ante baja disponibilidad
-  setupPulseTimers();
+
+  // inicializo indicadores (solo display)
+  indicatorsInit();
 
   // configurar ADC
   analogContinuousSetWidth(12);
@@ -252,18 +360,8 @@ void setup() {
   analogContinuous(adc_pins, adc_pins_count, CONVERSIONS_PER_PIN, Fs, &adcComplete);
     
   // --- CALIBRACIÓN DE OFFSET ---
-  // encender LEDs 
-  digitalWrite(ledRojo1, HIGH);
-  delay(200);
-  digitalWrite(ledRojo2, HIGH);
-  delay(200);
-  digitalWrite(ledAmarillo1, HIGH);
-  delay(200);
-  digitalWrite(ledAmarillo2, HIGH);
-  delay(200);
-  digitalWrite(ledVerde1, HIGH);
-  delay(200);
-  digitalWrite(ledVerde2, HIGH);
+  // mostrar test visual (display)
+  indicatorsTestSequence();
 
   Serial.println("Iniciando calibración de offset...");
   // iniciar la conversión continua del ADC
@@ -291,20 +389,6 @@ void setup() {
   bufferFull = false;
   Serial.printf("Offset calibrado: %.5f V\n", voltageOffset);
 
-  // apagar LEDs
-  delay(1000);
-  digitalWrite(ledRojo1, LOW);
-  delay(200);
-  digitalWrite(ledRojo2, LOW);
-  delay(200);
-  digitalWrite(ledAmarillo1, LOW);
-  delay(200);
-  digitalWrite(ledAmarillo2, LOW);
-  delay(200);
-  digitalWrite(ledVerde1, LOW);
-  delay(200);
-  digitalWrite(ledVerde2, LOW);
-
   myPriority = readDipPriority(); 
   // imprimir en consola una vez la prioridad
   Serial.printf("priority dipswitch: %u\n", myPriority);
@@ -330,14 +414,15 @@ void setup() {
   }
   digitalWrite(rele,HIGH);
 
-  // iniciar la conversión continua del ADC
-  // analogContinuousStart();
+  // inicializamos pantalla/variables
+  lastMeasuredCurrent = 0.0f;
+  lastScreenSwitch = millis();
+  screenMode = 0;
 }
 
 
 void loop() {
-  // prioridad para el nodo, siendo 0 la mas alta y 3 la mas baja
-                   
+  // PRIORIDAD y lectura/decisión de relé (idéntico a tu código original)
 
   // primer clausula, chequear si el circuito esta activo consumiendo corriente
   if (digitalRead(rele)){
@@ -374,12 +459,12 @@ void loop() {
       Vrms = (Vrms < 0.018) ? 0 : Vrms;       // ventana de histeresis para valores muy pequeños
       
       float currentRMS = Vrms / sensibility;      // convertir valor en tension a corriente
-      // float power = voltageRMS * currentRMS;      // calculo de potencia aparente
       
+      // guardar para display
+      lastMeasuredCurrent = currentRMS;
+
       // mostrar valores calculados  por consola
-      // Serial.printf("Tension RMS: %.4f, Corriente RMS %.4f, %.4f\n", Vrms, currentRMS, power);
       Serial.printf("Vrms: %.4f, Arms: %.4f\n", Vrms, currentRMS);
-      // Serial.printf("Valor rele: %d \n", digitalRead(rele));
 
       // enviar mensaje de consumo a los demas nodos de consumo
       consensus_msg_t msg_send = { currentRMS, myPriority };
@@ -454,4 +539,7 @@ void loop() {
       digitalWrite(rele, HIGH);
     }
   }
+
+  // ---------- actualización periódica de display ----------
+  displayUpdate();
 }
