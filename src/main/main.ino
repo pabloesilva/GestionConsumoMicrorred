@@ -222,7 +222,7 @@ void displayUpdate() {
     display.setCursor(0, 0); 
     display.print("Consumo:");
     display.setTextSize(2); 
-    String s = String(lastMeasuredCurrent, 2) + "A";
+    String s = String(lastMeasuredCurrent, 2) + " A";
     int16_t x1, y1; uint16_t w1, h1; 
     display.getTextBounds(s, 0, 0, &x1, &y1, &w1, &h1);
     int xText = (SCREEN_WIDTH - w1) / 2; 
@@ -232,19 +232,14 @@ void displayUpdate() {
     display.print(s);
     } 
     else { 
-    // Pantalla 2: Prioridad
-    display.setTextSize(1);
-    display.setCursor(0, 0);
-    display.print("Prioridad:");
-
     // Mostrar el número de prioridad en grande (centrado)
     display.setTextSize(2); // Tamaño grande para el número
-    String prioNumStr = String(myPriority);
+    String prioNumStr = "P"+ String(myPriority);
     int16_t x1, y1; uint16_t w1, h1;
     display.getTextBounds(prioNumStr, 0, 0, &x1, &y1, &w1, &h1); // Medir tamaño
     // Centrar horizontalmente, posicionar verticalmente en el medio
     int xNum = (SCREEN_WIDTH - w1) / 2;
-    int yNum = 9; // Ajustar posición vertical si es necesario
+    int yNum = 1; // Ajustar posición vertical si es necesario
     if (xNum < 0) xNum = 0;
     display.setCursor(xNum, yNum);
     display.print(prioNumStr);
@@ -269,7 +264,7 @@ void displayUpdate() {
     // Centrar descripción horizontalmente, debajo del número
     display.getTextBounds(priorityDesc, 0, 0, &x1, &y1, &w1, &h1);
     int xDesc = (SCREEN_WIDTH - w1) / 2;
-    int yDesc = 25; // Posición Y en la última línea
+    int yDesc = 21; // Posición Y en la última línea
     if (xDesc < 0) xDesc = 0;
     display.setCursor(xDesc, yDesc);
     display.print(priorityDesc);
