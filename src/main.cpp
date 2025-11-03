@@ -1,3 +1,8 @@
+/* AC (ESP32) - Sketch completo con recepción CAN interrupt-driven para mensajes desde LAUNCHXL-F28377S
+   Mensaje esperado: CAN ID 0x610, 4 bytes: V_LSB, V_MSB, I_LSB, I_MSB
+   Escala usada: cada valor 16-bit (0..65535) proporcional a 0..V_MAX / 0..I_MAX
+*/
+
 #include <Arduino.h>
 #include <esp_now.h>
 #include <WiFi.h>
@@ -60,7 +65,11 @@ unsigned long lastAvailabilitySend = 0;
 const unsigned long availabilityInterval = WINDOW_MS; 
 const unsigned long canInterval = 1000;
 
-// ---------------------------------------------- botones --------------------------------------------------------
+// -------------------- parámetros de escalado para los mensajes recibidos desde la placa TI ----------------------
+#define V_MAX 100.0f   // Debe coincidir con el V_MAX de la placa TI
+#define I_MAX 20.0f    // Debe coincidir con el I_MAX de la placa TI
+
+// ------------------------------ botones ------------------------------------------------
 const int btnPrevPin = 14; 
 const int btnNextPin = 27; 
 const int btnHomePin = 26; 
@@ -88,7 +97,7 @@ int nodesStartIndex = 0;
 // ------------------------------ variables para calculo de potencia ----------------------------------------------
 const float V_MIN = 30.0f;
 double Vrms = 0;
-float availablePower = 2200.0f;
+float availablePower = 0.0f; // valor por defecto; será reemplazado por lectura CAN si llega mensaje
 unsigned long time_perfil = millis();
 int i = 0;
 int count = 0;
@@ -123,7 +132,6 @@ void showNodesScreenPaged(int startIndex);
 void purgeStalePeers();
 void setupEspNow();
 void displayMessage(const char* msg, bool clear = true);
-
 
 // ------------------------------------------ ISR y funciones del ADC ----------------------------------------------
 void IRAM_ATTR onTimerCallback() {
@@ -414,7 +422,6 @@ void checkButtons() {
     }
 }
 
-
 // ---------------------------------------- funciones ESP-NOW -----------------------------------------------------
 void onDataRecv(const uint8_t* mac, const uint8_t* buf, int len) {
   if (len == sizeof(consensus_msg_t)) {
@@ -482,6 +489,19 @@ void purgeStalePeers() {
   }
 }
 
+// ---------------------- RECEPCION CAN INTERRUPT-DRIVEN (variables y ISR) -----------------------
+volatile bool canRxFlag = false;          // bandera puesta por ISR cuando MCP2515 activa INT
+unsigned long lastPanelRecvTime = 0;
+unsigned long secondLastPanelRecvTime = 0;
+float lastPanelV = 0.0f;
+float lastPanelI = 0.0f;
+float lastPanelP = 0.0f;
+
+void IRAM_ATTR canIntISR() {
+  // ISR extremadamente corta: sólo marcar flag
+  canRxFlag = true;
+}
+
 // ---------------------------------------------- setup y loop ------------------------------------------------------
 void setup() {
   Serial.begin(115200);
@@ -517,6 +537,13 @@ void setup() {
     canInitOk = true;
   }
 
+  // --- Attach interrupt from MCP2515 INT pin (falling edge) ---
+  if (canInitOk) {
+    pinMode(CAN_INT_PIN, INPUT_PULLUP);
+    // attachInterrupt requires a function pointer; ISR must be IRAM_ATTR for ESP32
+    attachInterrupt(digitalPinToInterrupt(CAN_INT_PIN), canIntISR, FALLING);
+  }
+
   setupEspNow();
 
   lastCanAttemptMillis = millis();
@@ -546,7 +573,7 @@ void setup() {
 }
 
 void loop() {
-  float power_perfil[3] = {4400.0,3300.0,2200.0};
+  //float power_perfil[3] = {4400.0,3300.0,2200.0};
 
   unsigned long now = millis();
 
@@ -572,7 +599,48 @@ void loop() {
     startSampling();
     displayNeedsUpdate = true;
   }
-  // ---------- end ADC processing ----------`
+  // ---------- end ADC processing ----------
+
+  // ---------- PROCESAR MENSAJES CAN RECIBIDOS (ISR-driven) ----------
+  if (canRxFlag) {
+    // Limpiar flag lo antes posible
+    canRxFlag = false;
+
+    struct can_frame tmpFrame;
+    // Leer todos los mensajes que estén pendientes
+    while (mcp2515.readMessage(&tmpFrame) == MCP2515::ERROR_OK) {
+      uint16_t recvId = (uint16_t)(tmpFrame.can_id & 0x7FF);
+      if (recvId == 0x610 && tmpFrame.can_dlc >= 4) {
+        // Reconstruir valores (LSB primero)
+        uint16_t v_u16 = (uint16_t)((tmpFrame.data[1] << 8) | tmpFrame.data[0]);
+        uint16_t i_u16 = (uint16_t)((tmpFrame.data[3] << 8) | tmpFrame.data[2]);
+
+        float measV = ((float)v_u16 / 65535.0f) * V_MAX;
+        float measI = ((float)i_u16 / 65535.0f) * I_MAX;
+        float panelP = measV * measI;
+
+        // Actualizar históricos / timestamps
+        secondLastPanelRecvTime = lastPanelRecvTime;
+        lastPanelRecvTime = millis();
+
+        lastPanelV = measV;
+        lastPanelI = measI;
+        lastPanelP = panelP;
+
+        // Decidir cómo incorporar esta info en el AC: aquí reemplazamos availablePower
+        availablePower = panelP; // <-- ahora la AC usará la potencia reportada por la placa TI
+
+        // Marcar pantalla para actualización
+        displayNeedsUpdate = true;
+
+        // (Opcional) debug por serial
+        Serial.printf("RX CAN 0x610: V=%.3f V, I=%.3f A, P=%.3f W\n", measV, measI, panelP);
+      } else {
+        // Mensaje no relevante o distinto ID: ignorar o loguear si lo consideras útil
+      }
+    }
+  }
+  // ---------- FIN PROCESAR MENSAJES CAN ----------
 
   // 1) send availability at availabilityInterval (we now send availableCurrent)
   if (now - lastAvailabilitySend >= availabilityInterval) {
@@ -581,7 +649,8 @@ void loop() {
         time_perfil = millis(); 
         count++;
         i = count%3;
-        availablePower = power_perfil[i];
+        // Si availablePower viene por CAN, no sobrescribirlo aquí.
+        // availablePower = power_perfil[i]; // <-- comentado para respetar valor CAN
       }
     
     float availableCurrent = 0.0f;
@@ -609,7 +678,7 @@ void loop() {
     for (auto &p : peers) totalConsumption += p.power;
 
     uint32_t totalConsumption_as_int = static_cast<uint32_t>(totalConsumption * 100);
-    canMsg.can_id = 0x603;
+    canMsg.can_id = 0x620;
     canMsg.can_dlc = 4;
     canMsg.data[0] = (totalConsumption_as_int >> 24) & 0xFF;
     canMsg.data[1] = (totalConsumption_as_int >> 16) & 0xFF;
