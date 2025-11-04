@@ -1,8 +1,3 @@
-/* AC (ESP32) - Sketch completo con recepción CAN interrupt-driven para mensajes desde LAUNCHXL-F28377S
-   Mensaje esperado: CAN ID 0x610, 4 bytes: V_LSB, V_MSB, I_LSB, I_MSB
-   Escala usada: cada valor 16-bit (0..65535) proporcional a 0..V_MAX / 0..I_MAX
-*/
-
 #include <Arduino.h>
 #include <esp_now.h>
 #include <WiFi.h>
@@ -66,8 +61,8 @@ const unsigned long availabilityInterval = WINDOW_MS;
 const unsigned long canInterval = 1000;
 
 // -------------------- parámetros de escalado para los mensajes recibidos desde la placa TI ----------------------
-#define V_MAX 100.0f   // Debe coincidir con el V_MAX de la placa TI
-#define I_MAX 20.0f    // Debe coincidir con el I_MAX de la placa TI
+#define V_MAX 100.0f   
+#define I_MAX 40.0f    
 
 // ------------------------------ botones ------------------------------------------------
 const int btnPrevPin = 14; 
@@ -344,7 +339,7 @@ void updateDisplay() {
     forceDisplayRedraw = false;
 }
 
-// ---------------------------------------------- manejo de botones ----------------------------------------------------
+// ---------------------------------------------- ISR de botones ----------------------------------------------------
 
 void IRAM_ATTR isrPrev() {
   lastButtonInterrupt[0] = millis();
@@ -361,8 +356,7 @@ void IRAM_ATTR isrHome() {
 
 void checkButtons() {
     unsigned long now = millis();
-
-    // Check Prev button
+    // boton anterior
     if (digitalRead(btnPrevPin) == HIGH && btnPrevPressed) {
         if (now - lastButtonInterrupt[0] > debounceMs) {
             btnPrevPressed = false;
@@ -371,19 +365,17 @@ void checkButtons() {
         if (!btnPrevPressed) {
             btnPrevPressed = true;
             lastButtonInterrupt[0] = now;
-            // Handle Prev press
             if (screenIndex > 0) {
                 screenIndex--;
             } else {
-                screenIndex = 2; // Volver al final si ya está en la primera
+                screenIndex = 2;
             }
             nodesStartIndex = 0;
             displayNeedsUpdate = true;
             forceDisplayRedraw = true;
         }
     }
-
-    // Check Next button
+    // boton siguiente
     if (digitalRead(btnNextPin) == HIGH && btnNextPressed) {
         if (now - lastButtonInterrupt[1] > debounceMs) {
             btnNextPressed = false;
@@ -392,11 +384,10 @@ void checkButtons() {
         if (!btnNextPressed) {
             btnNextPressed = true;
             lastButtonInterrupt[1] = now;
-            // Handle Next press
             if (screenIndex < 2) {
                 screenIndex++;
             } else {
-                screenIndex = 0; // Volver al inicio si ya está en la última
+                screenIndex = 0; 
             }
             nodesStartIndex = 0;
             displayNeedsUpdate = true;
@@ -404,7 +395,7 @@ void checkButtons() {
         }
     }
     
-    // Check Home button for long press
+    //reiniciar con pulsacion larga 
     if (digitalRead(btnHomePin) == LOW && (now - btnHomePressStart) >= longPressMs && btnHomePressed) {
       btnHomePressed = false;
       display.clearDisplay();
@@ -476,7 +467,7 @@ void setupEspNow() {
   esp_now_add_peer(&peerInfo);
 }
 
-// ---------------------------------------- limpieza de nodos obsoletos -------------------------------------------
+// ---------------------------------------- limpieza de nodos viejos -------------------------------------------
 void purgeStalePeers() {
   unsigned long now = millis();
   for (int i = (int)peers.size() - 1; i >= 0; --i) {
@@ -489,8 +480,8 @@ void purgeStalePeers() {
   }
 }
 
-// ---------------------- RECEPCION CAN INTERRUPT-DRIVEN (variables y ISR) -----------------------
-volatile bool canRxFlag = false;          // bandera puesta por ISR cuando MCP2515 activa INT
+// ------------------------------------ ISR mesajes CAN ------------------------------------
+volatile bool canRxFlag = false;          // bandera puesta cuando MCP2515 activa INT
 unsigned long lastPanelRecvTime = 0;
 unsigned long secondLastPanelRecvTime = 0;
 float lastPanelV = 0.0f;
@@ -498,7 +489,6 @@ float lastPanelI = 0.0f;
 float lastPanelP = 0.0f;
 
 void IRAM_ATTR canIntISR() {
-  // ISR extremadamente corta: sólo marcar flag
   canRxFlag = true;
 }
 
@@ -537,10 +527,9 @@ void setup() {
     canInitOk = true;
   }
 
-  // --- Attach interrupt from MCP2515 INT pin (falling edge) ---
+  // Interrupcion de mensaje CAN, flanco bajo en el pin 4
   if (canInitOk) {
     pinMode(CAN_INT_PIN, INPUT_PULLUP);
-    // attachInterrupt requires a function pointer; ISR must be IRAM_ATTR for ESP32
     attachInterrupt(digitalPinToInterrupt(CAN_INT_PIN), canIntISR, FALLING);
   }
 
@@ -549,7 +538,7 @@ void setup() {
   lastCanAttemptMillis = millis();
   lastAvailabilitySend = 0;
 
-  // --- ADC: calibración de offset (bloqueante) ---
+  // calibración de offset
   startSampling();
   while (!bufferFull) {
     yield();
@@ -573,6 +562,8 @@ void setup() {
 }
 
 void loop() {
+
+  // perfil de potencia disponible (ejemplo)
   //float power_perfil[3] = {4400.0,3300.0,2200.0};
 
   unsigned long now = millis();
@@ -580,7 +571,7 @@ void loop() {
   // Manejo de botones con flags y lógica fuera de ISR
   checkButtons();
 
-  // ---------- ADC: process bufferFull to compute Vrms ----------
+  // ---------- Computo Vrms cuando el buffer está lleno ----------
   if (bufferFull) {
     stopSampling();
     double sumsq = 0.0;
@@ -599,27 +590,45 @@ void loop() {
     startSampling();
     displayNeedsUpdate = true;
   }
-  // ---------- end ADC processing ----------
 
-  // ---------- PROCESAR MENSAJES CAN RECIBIDOS (ISR-driven) ----------
+
+  // ---------- PROCESAR MENSAJES CAN RECIBIDOS ----------
   if (canRxFlag) {
-    // Limpiar flag lo antes posible
+    // limpiar flag lo antes posible
     canRxFlag = false;
 
     struct can_frame tmpFrame;
-    // Leer todos los mensajes que estén pendientes
+    // leer todos los mensajes que estén pendientes
     while (mcp2515.readMessage(&tmpFrame) == MCP2515::ERROR_OK) {
       uint16_t recvId = (uint16_t)(tmpFrame.can_id & 0x7FF);
       if (recvId == 0x610 && tmpFrame.can_dlc >= 4) {
-        // Reconstruir valores (LSB primero)
-        uint16_t v_u16 = (uint16_t)((tmpFrame.data[1] << 8) | tmpFrame.data[0]);
-        uint16_t i_u16 = (uint16_t)((tmpFrame.data[3] << 8) | tmpFrame.data[2]);
+       // parámetros de validación
+        const float MIN_VALID_V = 0.01f;   // V umbral para considerar "no cero"
+        const float MIN_VALID_I = 0.01f;   // A umbral para considerar "no cero"
+        const unsigned long DATA_EXPIRY_MS = 10000; // si no llega msg en 10 s, considerar sin dato
 
-        float measV = ((float)v_u16 / 65535.0f) * V_MAX;
-        float measI = ((float)i_u16 / 65535.0f) * I_MAX;
+        //desempaquetar datos
+        uint16_t v_u16 = (uint16_t)( (uint16_t)tmpFrame.data[0] | ((uint16_t)tmpFrame.data[1] << 8) );
+        uint16_t i_u16 = (uint16_t)( (uint16_t)tmpFrame.data[2] | ((uint16_t)tmpFrame.data[3] << 8) );
+
+        // reconstrucción float con la misma escala que usa el AG (0..65535 -> 0..V_MAX / 0..I_MAX)
+        float measV = ((float)v_u16) / 65535.0f * V_MAX;
+        float measI = ((float)i_u16) / 65535.0f * I_MAX;
+
+        // clausulas por si llegan números fuera de rango 
+        if (measV < 0.0f) measV = 0.0f;
+        if (measI < 0.0f) measI = 0.0f;
+        if (measV > V_MAX) measV = V_MAX;
+        if (measI > I_MAX) measI = I_MAX;
+
+        // Si ambos valores son muy pequeños, tratarlos como cero
+        if (measV < MIN_VALID_V) measV = 0.0f;
+        if (measI < MIN_VALID_I) measI = 0.0f;
+        
+        //valor de potencia
         float panelP = measV * measI;
 
-        // Actualizar históricos / timestamps
+        // actualizar timestamps
         secondLastPanelRecvTime = lastPanelRecvTime;
         lastPanelRecvTime = millis();
 
@@ -627,31 +636,23 @@ void loop() {
         lastPanelI = measI;
         lastPanelP = panelP;
 
-        // Decidir cómo incorporar esta info en el AC: aquí reemplazamos availablePower
-        availablePower = panelP; // <-- ahora la AC usará la potencia reportada por la placa TI
+        availablePower = panelP;
 
-        // Marcar pantalla para actualización
+        // actualizar display
         displayNeedsUpdate = true;
-
-        // (Opcional) debug por serial
-        Serial.printf("RX CAN 0x610: V=%.3f V, I=%.3f A, P=%.3f W\n", measV, measI, panelP);
-      } else {
-        // Mensaje no relevante o distinto ID: ignorar o loguear si lo consideras útil
       }
-    }
   }
-  // ---------- FIN PROCESAR MENSAJES CAN ----------
 
-  // 1) send availability at availabilityInterval (we now send availableCurrent)
+  // ---------- Envio y recepción de información local ----------
   if (now - lastAvailabilitySend >= availabilityInterval) {
     
-    if (millis() - time_perfil >= 30000) {
-        time_perfil = millis(); 
-        count++;
-        i = count%3;
-        // Si availablePower viene por CAN, no sobrescribirlo aquí.
-        // availablePower = power_perfil[i]; // <-- comentado para respetar valor CAN
-      }
+    // actualizar perfil de potencia disponible (ejemplo)
+    // if (millis() - time_perfil >= 30000) {
+    //     time_perfil = millis(); 
+    //     count++;
+    //     i = count%3;
+    //     // availablePower = power_perfil[i]; // <-- comentado para respetar valor CAN
+    //   }
     
     float availableCurrent = 0.0f;
     if (Vrms >= V_MIN && availablePower > 0.0f) {
@@ -665,13 +666,13 @@ void loop() {
     lastAvailabilitySend = now;
   }
 
-  // 2) purge peers and compute totals
+  // purgado de nodos viejos
   purgeStalePeers();
 
-  // 3) update display only when needed
+  // actualizar display si es necesario
   if (displayNeedsUpdate) updateDisplay();
 
-  // 4) CAN send every canInterval (no-blocking, reintento y recovery)
+  // ---------- Envio de mensajes CAN ----------
   if (now - lastCanAttemptMillis >= canInterval) {
     lastCanAttemptMillis = now;
     float totalConsumption = 0;
@@ -745,4 +746,5 @@ void loop() {
       }
     }
   }
+}
 }
