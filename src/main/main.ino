@@ -104,6 +104,8 @@ float lastMeasuredCurrent = 0.0f;
 unsigned long lastScreenSwitch = 0;
 const uint32_t screenSwitchInterval = 4000; // 5 segundos
 int screenMode = 0; // 0 = mostrar disponibilidad (barra + valor abajo), 1 = mostrar consumo grande, 2=prioridad
+unsigned long lastDisplayUpdate = 0;
+const uint32_t displayUpdateInterval = 50; // ms (aprox 20 FPS)
 
 // ----------------- WRAPPERS DE INDICADORES -----------------
 // Inicializa display
@@ -111,7 +113,7 @@ void indicatorsInit() {
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(100000);
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("Error: SSD1306 no inicializado");
+    //Serial.println("Error: SSD1306 no inicializado");
   } else {
     display.clearDisplay();
     display.display();
@@ -239,7 +241,7 @@ void displayUpdate() {
     display.getTextBounds(prioNumStr, 0, 0, &x1, &y1, &w1, &h1); // Medir tamaño
     // Centrar horizontalmente, posicionar verticalmente en el medio
     int xNum = (SCREEN_WIDTH - w1) / 2;
-    int yNum = 1; // Ajustar posición vertical si es necesario
+    int yNum = 2; // Ajustar posición vertical si es necesario
     if (xNum < 0) xNum = 0;
     display.setCursor(xNum, yNum);
     display.print(prioNumStr);
@@ -264,7 +266,7 @@ void displayUpdate() {
     // Centrar descripción horizontalmente, debajo del número
     display.getTextBounds(priorityDesc, 0, 0, &x1, &y1, &w1, &h1);
     int xDesc = (SCREEN_WIDTH - w1) / 2;
-    int yDesc = 21; // Posición Y en la última línea
+    int yDesc = 23; // Posición Y en la última línea
     if (xDesc < 0) xDesc = 0;
     display.setCursor(xDesc, yDesc);
     display.print(priorityDesc);
@@ -427,7 +429,7 @@ void setup() {
   
   // inicializar ESP-NOW
   if (esp_now_init() != ESP_OK) {
-    Serial.println("error inicializando esp-now");
+    //Serial.println("error inicializando esp-now");
     return;
   }
   
@@ -439,7 +441,7 @@ void setup() {
   peerInfo.channel = 0;
   peerInfo.encrypt = false;
   if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-    Serial.println("error agregando peer broadcast");
+    //Serial.println("error agregando peer broadcast");
   }
   digitalWrite(rele,HIGH);
 
@@ -493,7 +495,7 @@ void loop() {
       lastMeasuredCurrent = currentRMS;           // guardar para display
 
       // mostrar valores calculados  por consola
-      Serial.printf("Vrms: %.4f, Arms: %.4f\n", Vrms, currentRMS);
+      //Serial.printf("Vrms: %.4f, Arms: %.4f\n", Vrms, currentRMS);
 
       // 2) enviar mensaje de consumo a los demas nodos de consumo
       consensus_msg_t msg_send = { currentRMS, myPriority };
@@ -570,8 +572,10 @@ void loop() {
     if ((msg_disp.availableCurrent - totalCurrent) > 0){
       digitalWrite(rele, HIGH);
     }
-  }
+  } 
 
-  //actualización periódica de display
-  displayUpdate();
+  if (millis() - lastDisplayUpdate >= displayUpdateInterval) {
+    lastDisplayUpdate = millis();
+    displayUpdate(); 
+  }
 }
