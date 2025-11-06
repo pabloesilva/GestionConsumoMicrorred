@@ -37,7 +37,6 @@ const unsigned long WINDOW_MS = 600; // ventana para considerar nodos activos
 static unsigned long lastMessageTime = 0;
 static unsigned long secondLastMessageTime = 0;
 
-
 // ------------------------------------------- pantalla OLED -----------------------------------------------------
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -78,7 +77,6 @@ volatile unsigned long lastButtonInterrupt[3] = {0, 0, 0};
 const unsigned long debounceMs = 25;
 const unsigned long longPressMs = 3000;
 
-
 // ------------------------------ variables para manejo de las pantallas -----------------------------------------
 int screenIndex = 0;
 bool displayNeedsUpdate = true;
@@ -88,11 +86,14 @@ volatile bool forceDisplayRedraw = false;
 const int nodesPerPage = 5;
 int nodesStartIndex = 0;
 
-
 // ------------------------------ variables para calculo de potencia ----------------------------------------------
+// OBSERVACIÓN: availablePower ahora -1.0f indica "sin dato CAN válido todavía"
 const float V_MIN = 30.0f;
 double Vrms = 0;
-float availablePower = 0.0f; // valor por defecto; será reemplazado por lectura CAN si llega mensaje
+float availablePower = -1.0f; // valor por defecto; -1 = sin dato CAN
+bool panelDataValid = false;   // indica si hay dato CAN válido y no caducado
+const unsigned long DATA_EXPIRY_MS = 10000; // 10s: si no llega msg en 10 s, considerar sin dato
+
 unsigned long time_perfil = millis();
 int i = 0;
 int count = 0;
@@ -121,7 +122,7 @@ esp_adc_cal_characteristics_t adc_chars;
 // ---------------------------------------- declaracion de funciones ----------------------------------------------
 void updateDisplay();
 void macToStr(const uint8_t mac[6], char out[18]);
-void showMainScreen(float availablePower, float V_rms, float availableCurrent, float totalConsumption, int nodeCount, unsigned long messageInterval, const char* lastNodeMac, bool force);
+void showMainScreen(float availablePower, float V_rms, float availableCurrent, float totalConsumption, int nodeCount, unsigned long messageInterval, const char* lastNodeMac, bool force, bool panelValid);
 void showCanScreen(bool canOk, unsigned long canInterval, int consecFailures, bool force);
 void showNodesScreenPaged(int startIndex);
 void purgeStalePeers();
@@ -168,14 +169,15 @@ void displayMessage(const char* msg, bool clear) {
 }
 
 // ------------------------------------- pantalla 0: disponibilidad y consumo --------------------------------------
-void showMainScreen(float availablePower, float V_rms, float availableCurrent, float totalConsumption, int nodeCount, unsigned long messageInterval, const char* lastNodeMac, bool force) {
-  static float lastAvailablePower = -1.0f;
+void showMainScreen(float availablePower, float V_rms, float availableCurrent, float totalConsumption, int nodeCount, unsigned long messageInterval, const char* lastNodeMac, bool force, bool panelValid) {
+  static float lastAvailablePower = -9999.0f;
   static float lastV = -1.0f;
   static float lastI = -1.0f;
   static float lastTotal = -1.0f;
   static int lastNodeCount = -1;
   static unsigned long lastMsgInterval = 0;
   static char lastMacPrinted[18] = "-";
+  static bool lastPanelValid = false;
 
   if (!force) {
     if (fabs(availablePower - lastAvailablePower) < 0.1f &&
@@ -184,7 +186,8 @@ void showMainScreen(float availablePower, float V_rms, float availableCurrent, f
         fabs(totalConsumption - lastTotal) < 0.1f &&
         nodeCount == lastNodeCount &&
         messageInterval == lastMsgInterval &&
-        ((lastNodeMac==nullptr && strcmp(lastMacPrinted,"-")==0) || (lastNodeMac && strcmp(lastNodeMac,lastMacPrinted)==0))) {
+        ((lastNodeMac==nullptr && strcmp(lastMacPrinted,"-")==0) || (lastNodeMac && strcmp(lastNodeMac,lastMacPrinted)==0)) &&
+        panelValid == lastPanelValid) {
       return;
     }
   }
@@ -195,6 +198,8 @@ void showMainScreen(float availablePower, float V_rms, float availableCurrent, f
   lastTotal = totalConsumption;
   lastNodeCount = nodeCount;
   lastMsgInterval = messageInterval;
+  lastPanelValid = panelValid;
+
   if (lastNodeMac) {
     strncpy(lastMacPrinted, lastNodeMac, sizeof(lastMacPrinted)-1);
     lastMacPrinted[sizeof(lastMacPrinted)-1] = '\0';
@@ -207,13 +212,21 @@ void showMainScreen(float availablePower, float V_rms, float availableCurrent, f
   display.setTextColor(SSD1306_WHITE);
 
   display.setCursor(0, 0);
-  display.printf("Potencia: %.1f W", availablePower);
+  if (!panelValid || availablePower < 0.0f) {
+    display.printf("Potencia: N/A");
+  } else {
+    display.printf("Potencia: %.1f W", availablePower);
+  }
 
   display.setCursor(0, 10);
   display.printf("Vrms: %.2f V", V_rms);
 
   display.setCursor(0, 20);
-  display.printf("Imax: %.3f A", availableCurrent);
+  if (!panelValid || availablePower < 0.0f) {
+    display.printf("Imax: -- A");
+  } else {
+    display.printf("Imax: %.3f A", availableCurrent);
+  }
 
   display.setCursor(0, 40);
   display.printf("Consumo: %.4f A", totalConsumption);
@@ -320,14 +333,13 @@ void updateDisplay() {
       char lastNodeMacStr[18] = "-";
       if (idxMinAge >= 0) macToStr(peers[idxMinAge].mac, lastNodeMacStr);
 
-      // float availablePower = 2200.0f;
       float availableCurrent = 0.0f;
-      if (Vrms >= V_MIN && availablePower > 0.0f) {
+      if (Vrms >= V_MIN && availablePower > 0.0f && panelDataValid) {
         availableCurrent = availablePower / Vrms;
       } else {
         availableCurrent = 0.0f;
       }
-      showMainScreen(availablePower, Vrms, availableCurrent, totalConsumption, nodeCount, messageInterval, (idxMinAge >= 0) ? lastNodeMacStr : nullptr, force);
+      showMainScreen(availablePower, Vrms, availableCurrent, totalConsumption, nodeCount, messageInterval, (idxMinAge >= 0) ? lastNodeMacStr : nullptr, force, panelDataValid);
     } else if (screenIndex == 1) {
       showNodesScreenPaged(nodesStartIndex);
     } else {
@@ -507,6 +519,9 @@ void setup() {
   timerAttachInterrupt(samplingTimer, &onTimerCallback, true);
 
   // Button setup (Interrupciones)
+  pinMode(btnPrevPin, INPUT_PULLUP);
+  pinMode(btnNextPin, INPUT_PULLUP);
+  pinMode(btnHomePin, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(btnPrevPin), isrPrev, FALLING);
   attachInterrupt(digitalPinToInterrupt(btnNextPin), isrNext, FALLING);
   attachInterrupt(digitalPinToInterrupt(btnHomePin), isrHome, FALLING);
@@ -563,9 +578,6 @@ void setup() {
 
 void loop() {
 
-  // perfil de potencia disponible (ejemplo)
-  //float power_perfil[3] = {4400.0,3300.0,2200.0};
-
   unsigned long now = millis();
 
   // Manejo de botones con flags y lógica fuera de ISR
@@ -582,7 +594,7 @@ void loop() {
       sumsq += Vcorr * Vcorr;
     }
     Vrms = sqrt(sumsq / double(bufferSize));
-    Vrms = Vrms*998;
+    Vrms = Vrms*998; // mantener la escala original (revisar si es necesario)
 
     // reiniciar muestreo
     bufferIndex = 0;
@@ -605,7 +617,6 @@ void loop() {
        // parámetros de validación
         const float MIN_VALID_V = 0.01f;   // V umbral para considerar "no cero"
         const float MIN_VALID_I = 0.01f;   // A umbral para considerar "no cero"
-        const unsigned long DATA_EXPIRY_MS = 10000; // si no llega msg en 10 s, considerar sin dato
 
         //desempaquetar datos
         uint16_t v_u16 = (uint16_t)( (uint16_t)tmpFrame.data[0] | ((uint16_t)tmpFrame.data[1] << 8) );
@@ -636,26 +647,28 @@ void loop() {
         lastPanelI = measI;
         lastPanelP = panelP;
 
+        // actualizar last known data y marcar como válido
         availablePower = panelP;
+        panelDataValid = true;
 
         // actualizar display
         displayNeedsUpdate = true;
       }
+    }
   }
 
   // ---------- Envio y recepción de información local ----------
+  // invalidar panelDataValid si ha pasado mucho tiempo desde el último mensaje CAN
+  if (panelDataValid && (millis() - lastPanelRecvTime > DATA_EXPIRY_MS)) {
+    panelDataValid = false;
+    // Si prefieres borrar también el valor guardado, descomenta la siguiente línea:
+    // availablePower = -1.0f;
+    displayNeedsUpdate = true;
+  }
+
   if (now - lastAvailabilitySend >= availabilityInterval) {
-    
-    // actualizar perfil de potencia disponible (ejemplo)
-    // if (millis() - time_perfil >= 30000) {
-    //     time_perfil = millis(); 
-    //     count++;
-    //     i = count%3;
-    //     // availablePower = power_perfil[i]; // <-- comentado para respetar valor CAN
-    //   }
-    
     float availableCurrent = 0.0f;
-    if (Vrms >= V_MIN && availablePower > 0.0f) {
+    if (Vrms >= V_MIN && availablePower > 0.0f && panelDataValid) {
       availableCurrent = availablePower / Vrms;
     } else {
       availableCurrent = 0.0f;
@@ -746,5 +759,4 @@ void loop() {
       }
     }
   }
-}
 }
