@@ -75,7 +75,7 @@ volatile bool btnHomePressed = false;
 volatile unsigned long btnHomePressStart = 0;
 volatile unsigned long lastButtonInterrupt[3] = {0, 0, 0};
 
-const unsigned long debounceMs = 25;
+const unsigned long debounceMs = 15;
 const unsigned long longPressMs = 3000;
 
 HardwareSerial SerialGW(0); // Usar UART0
@@ -278,7 +278,7 @@ void showCanScreen(bool canOk_local, unsigned long canInterval_local, int consec
   else display.printf("Ult. msj: %lums", canInterval_local > 999999UL ? 999999UL : canInterval_local);
 
   display.setCursor(0, 30);
-  display.printf("ID envio: 0x603");
+  display.printf("ID envio: 0x620");
 
   display.display();
 }
