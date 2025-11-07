@@ -9,6 +9,7 @@
 #include <cstring>
 #include <driver/adc.h>
 #include "esp_adc_cal.h"
+#include <HardwareSerial.h>
 
 static uint8_t broadcastAddress[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
@@ -76,6 +77,12 @@ volatile unsigned long lastButtonInterrupt[3] = {0, 0, 0};
 
 const unsigned long debounceMs = 25;
 const unsigned long longPressMs = 3000;
+
+HardwareSerial SerialGW(0); // Usar UART0
+#define GW_TX_PIN 1        
+#define GW_RX_PIN 3        
+unsigned long lastUartSendMillis = 0;
+const unsigned long uartSendInterval = 5000;
 
 // ------------------------------ variables para manejo de las pantallas -----------------------------------------
 int screenIndex = 0;
@@ -435,6 +442,13 @@ void onDataRecv(const uint8_t* mac, const uint8_t* buf, int len) {
     lastMessageTime = millis();
     displayNeedsUpdate = true;
 
+    char macStr[18];
+    macToStr(mac, macStr); // Usamos la función ya existente
+    SerialGW.printf("PEER:%s,%.4f,%d\n",
+                    macStr,
+                    msg.power,
+                    msg.priority);
+
     char macs[18];
     sprintf(macs, "%02X:%02X:%02X:%02X:%02X:%02X",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -506,7 +520,7 @@ void IRAM_ATTR canIntISR() {
 
 // ---------------------------------------------- setup y loop ------------------------------------------------------
 void setup() {
-  Serial.begin(115200);
+  //Serial.begin(115200);
 
   // ADC setup
   analogSetPinAttenuation(sensorPin, ADC_11db);
@@ -525,6 +539,8 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(btnPrevPin), isrPrev, FALLING);
   attachInterrupt(digitalPinToInterrupt(btnNextPin), isrNext, FALLING);
   attachInterrupt(digitalPinToInterrupt(btnHomePin), isrHome, FALLING);
+
+  SerialGW.begin(115200, SERIAL_8N1, GW_RX_PIN, GW_TX_PIN);
 
   Wire.begin();
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
@@ -664,6 +680,24 @@ void loop() {
     // Si prefieres borrar también el valor guardado, descomenta la siguiente línea:
     // availablePower = -1.0f;
     displayNeedsUpdate = true;
+  }
+
+  if (now - lastUartSendMillis >= uartSendInterval) {
+    lastUartSendMillis = now;
+
+    // 1. Enviar VRMS y Corriente Disponible
+    float current_available_uart = 0.0f;
+    if (Vrms >= V_MIN && availablePower > 0.0f && panelDataValid) {
+      current_available_uart = availablePower / Vrms;
+    }
+    // Formato: VRMS:voltaje,corriente
+    SerialGW.printf("VRMS:%.2f,%.3f\n", Vrms, current_available_uart);
+
+    // 2. Enviar Potencia del CAN
+    // Usamos el valor de 'availablePower' global, asegurando enviar 0 si no es válido
+    float power_to_send_uart = (panelDataValid && availablePower > 0.0f) ? availablePower : 0.0f;
+    // Formato: CAN_PWR:potencia
+    SerialGW.printf("CAN_PWR:%.1f\n", power_to_send_uart);
   }
 
   if (now - lastAvailabilitySend >= availabilityInterval) {
