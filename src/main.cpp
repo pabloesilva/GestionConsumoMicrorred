@@ -82,7 +82,7 @@ HardwareSerial SerialGW(0); // Usar UART0
 #define GW_TX_PIN 1        
 #define GW_RX_PIN 3        
 unsigned long lastUartSendMillis = 0;
-const unsigned long uartSendInterval = 5000;
+const unsigned long uartSendInterval = 2000;
 
 // ------------------------------ variables para manejo de las pantallas -----------------------------------------
 int screenIndex = 0;
