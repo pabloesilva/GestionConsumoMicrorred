@@ -62,7 +62,7 @@ const unsigned long canInterval = 1000;
 
 // -------------------- parámetros de escalado para los mensajes recibidos desde la placa TI ----------------------
 #define V_MAX 100.0f   
-#define I_MAX 40.0f    
+#define I_MAX 150.0f    
 
 // ------------------------------ botones ------------------------------------------------
 const int btnPrevPin = 14; 
