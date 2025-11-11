@@ -557,7 +557,7 @@ void loop() {
           }
         }
       }
-      analogContinuousStart();
+      if (digitalRead(rele) ) analogContinuousStart();
     }
   }else{
     // 4) purgar peers inactivos
@@ -573,7 +573,10 @@ void loop() {
       digitalWrite(rele, HIGH);
     }
   } 
-
+  if (!digitalRead(rele) ){
+    consensus_msg_t msg_send = {0.0, myPriority};
+    esp_now_send(broadcastAddress, (uint8_t*)&msg_send, sizeof(msg_send));
+  } 
   if (millis() - lastDisplayUpdate >= displayUpdateInterval) {
     lastDisplayUpdate = millis();
     displayUpdate(); 
