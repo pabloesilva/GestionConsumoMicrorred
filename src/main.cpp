@@ -58,7 +58,7 @@ bool canInitOk = false;
 unsigned long lastCanAttemptMillis = 0;
 unsigned long lastAvailabilitySend = 0;
 const unsigned long availabilityInterval = WINDOW_MS; 
-const unsigned long canInterval = 1000;
+const unsigned long canInterval = 5000;
 
 // -------------------- parámetros de escalado para los mensajes recibidos desde la placa TI ----------------------
 #define V_MAX 100.0f   
@@ -728,10 +728,11 @@ void loop() {
     uint32_t totalConsumption_as_int = static_cast<uint32_t>(totalConsumption * 100);
     canMsg.can_id = 0x620;
     canMsg.can_dlc = 4;
-    canMsg.data[0] = (totalConsumption_as_int >> 24) & 0xFF;
-    canMsg.data[1] = (totalConsumption_as_int >> 16) & 0xFF;
-    canMsg.data[2] = (totalConsumption_as_int >> 8) & 0xFF;
-    canMsg.data[3] = totalConsumption_as_int & 0xFF;
+    // little-endian (LSB primero)
+    canMsg.data[0] = (totalConsumption_as_int >> 0)  & 0xFF;   // LSB
+    canMsg.data[1] = (totalConsumption_as_int >> 8)  & 0xFF;
+    canMsg.data[2] = (totalConsumption_as_int >> 16) & 0xFF;
+    canMsg.data[3] = (totalConsumption_as_int >> 24) & 0xFF;   // MSB
 
     bool messageSent = false;
     int retries = 0;
