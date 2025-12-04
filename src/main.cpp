@@ -638,9 +638,9 @@ void loop() {
         uint16_t v_u16 = (uint16_t)( (uint16_t)tmpFrame.data[0] | ((uint16_t)tmpFrame.data[1] << 8) );
         uint16_t i_u16 = (uint16_t)( (uint16_t)tmpFrame.data[2] | ((uint16_t)tmpFrame.data[3] << 8) );
 
-        // reconstrucción float con la misma escala que usa el AG (0..65535 -> 0..V_MAX / 0..I_MAX)
-        float measV = ((float)v_u16) / 65535.0f * V_MAX;
-        float measI = ((float)i_u16) / 65535.0f * I_MAX;
+        // reconstrucción float con la misma escala que usa el AG (0..4095 -> 0..V_MAX / 0..I_MAX)
+        float measV = ((float)v_u16) / 4095.0f * V_MAX;
+        float measI = ((float)i_u16) / 4095.0f * I_MAX;
 
         // clausulas por si llegan números fuera de rango 
         if (measV < 0.0f) measV = 0.0f;
@@ -725,14 +725,12 @@ void loop() {
     float totalConsumption = 0;
     for (auto &p : peers) totalConsumption += p.power;
 
-    uint32_t totalConsumption_as_int = static_cast<uint32_t>(totalConsumption * 100);
+    uint16_t totalConsumption_as_int = static_cast<uint16_t>(totalConsumption * 100); 
     canMsg.can_id = 0x620;
-    canMsg.can_dlc = 4;
+    canMsg.can_dlc = 2;
     // little-endian (LSB primero)
-    canMsg.data[0] = (totalConsumption_as_int >> 0)  & 0xFF;   // LSB
-    canMsg.data[1] = (totalConsumption_as_int >> 8)  & 0xFF;
-    canMsg.data[2] = (totalConsumption_as_int >> 16) & 0xFF;
-    canMsg.data[3] = (totalConsumption_as_int >> 24) & 0xFF;   // MSB
+    canMsg.data[0] = totalConsumption_as_int  & 0xFF;   // LSB
+    canMsg.data[1] = (totalConsumption_as_int >> 8)  & 0xFF;   // MSB
 
     bool messageSent = false;
     int retries = 0;
