@@ -294,12 +294,12 @@ void onDataRecv(const esp_now_recv_info_t * info, const uint8_t* buf, int len) {
     if (ledsOn < 0) ledsOn = 0;
 
     if (ledsOn == 0) {
-      // activar modo parpadeo en display
-      indicatorsClearDisplay();
-      startPulseBlink(displayPulsePeriodMs, displayPulseWidthMs);
+      // Solo actualizar flags — NO llamar display.display() desde el callback
+      // (I2C es bloqueante y esto corre en la tarea WiFi, no en loop)
+      displayLedsOn = 0;
+      displayPulseActive = true;
     } else {
-      // desactivar parpadeo si estaba activo y mostrar estado proporcional
-      stopPulseBlink();
+      displayPulseActive = false;
       displayLedsOn = ledsOn;
     }
     return;
@@ -559,24 +559,34 @@ void loop() {
       }
       if (digitalRead(rele) ) analogContinuousStart();
     }
-  }else{
-    // 4) purgar peers inactivos
-    purgeStalePeers();
+  } else {
+    // relé desconectado — throttle al mismo periodo que la medición activa
+    // para no inundar la red con mensajes ESP-NOW ni ejecutar la lógica miles de veces/seg
+    static unsigned long lastOffSend = 0;
+    unsigned long nowOff = millis();
+    if (nowOff - lastOffSend < (WINDOW_MS / 10)) return; // mismo intervalo que el delay activo
+    lastOffSend = nowOff;
+
     firstMeasure = true;
-    //se vuelve a calcular la potencia con el ultimo dato de consumo mas un 5%
-    totalCurrent = 1.05*lastCurrent;
+
+    // purgar peers inactivos
+    purgeStalePeers();
+
+    // recalcular potencia estimada con el último consumo conocido + margen 5%
+    totalCurrent = 1.05f * lastCurrent;
     for (auto &p : peers) {
       totalCurrent += p.current;
     }
-    //para decidir si volverse a conectar o no se verifica si la potencia disponible es suficiente
-    if ((msg_disp.availableCurrent - totalCurrent) > 0){
+
+    // avisar al resto que este nodo consume 0 (una vez por intervalo)
+    consensus_msg_t msg_send = {0.0f, myPriority};
+    esp_now_send(broadcastAddress, (uint8_t*)&msg_send, sizeof(msg_send));
+
+    // reconectar solo si hay margen suficiente (umbral > 0 para evitar oscilación en el límite)
+    if ((msg_disp.availableCurrent - totalCurrent) > 0.05f) {
       digitalWrite(rele, HIGH);
     }
   }
-  if (!digitalRead(rele) ){
-    consensus_msg_t msg_send = {0.0, myPriority};
-    esp_now_send(broadcastAddress, (uint8_t*)&msg_send, sizeof(msg_send));
-  } 
 
   if (millis() - lastDisplayUpdate >= displayUpdateInterval) {
     lastDisplayUpdate = millis();
