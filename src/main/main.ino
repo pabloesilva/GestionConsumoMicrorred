@@ -501,8 +501,16 @@ void loop() {
       consensus_msg_t msg_send = { currentRMS, myPriority };
       esp_now_send(broadcastAddress, (uint8_t*)&msg_send, sizeof(msg_send));
 
-      // 3) esperar ventana para recibir de todos los nodos de consumo
-      delay(WINDOW_MS/10);
+      // 3) esperar ventana para recibir de todos los nodos de consumo (sin bloquear display ni callbacks)
+      { unsigned long _t = millis();
+        while (millis() - _t < WINDOW_MS / 10) {
+          if (millis() - lastDisplayUpdate >= displayUpdateInterval) {
+            lastDisplayUpdate = millis();
+            displayUpdate();
+          }
+          yield();
+        }
+      }
 
       // 4) purgar peers inactivos
       purgeStalePeers();
@@ -577,10 +585,6 @@ void loop() {
     for (auto &p : peers) {
       totalCurrent += p.current;
     }
-
-    // avisar al resto que este nodo consume 0 (una vez por intervalo)
-    consensus_msg_t msg_send = {0.0f, myPriority};
-    esp_now_send(broadcastAddress, (uint8_t*)&msg_send, sizeof(msg_send));
 
     // reconectar solo si hay margen suficiente (umbral > 0 para evitar oscilación en el límite)
     if ((msg_disp.availableCurrent - totalCurrent) > 0.05f) {
