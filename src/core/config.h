@@ -39,7 +39,7 @@ const float V_MIN = 30.0f;
 const unsigned long DATA_EXPIRY_MS = 10000;
 
 // ---------------- PEERS ----------------
-const unsigned long WINDOW_MS = 600;
+const unsigned long WINDOW_MS = 500;
 
 
 // ---------------- ADC ----------------
