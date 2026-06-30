@@ -6,7 +6,7 @@
 #include <esp_now.h>
 #include <HardwareSerial.h>
 #include <Wire.h>
-#include <MCP2515.h>
+#include <mcp2515.h>
 #include <SPI.h>
 
 // ---------------- ESPNOW disponibilidad ----------------

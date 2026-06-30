@@ -24,6 +24,12 @@ HardwareSerial SerialGW(0); // Usar UART0
 static std::vector<PeerData> peers;
 static portMUX_TYPE peersMux = portMUX_INITIALIZER_UNLOCKED;
 
+struct ZombiePeer {
+    uint8_t mac[6];
+    uint8_t priority;
+};
+static std::vector<ZombiePeer> zombies;
+
 static unsigned long lastPanelRecvTime = 0;
 static unsigned long secondLastPanelRecvTime = 0;
 
@@ -36,6 +42,7 @@ static unsigned long lastAvailabilitySend = 0;
 static unsigned long lastCanAttemptMillis = 0;
 
 static unsigned long lastCanResetAttempt = 0;
+static unsigned long lastCanSuccessMillis = 0;
 
 void onDataRecv(const uint8_t* mac, const uint8_t* buf, int len) {
   if (len == sizeof(consensus_msg_t)) {
@@ -96,6 +103,7 @@ bool comm_InitCan(){
   }
 
   lastCanAttemptMillis = millis();
+  lastCanSuccessMillis = millis();
   lastAvailabilitySend = 0;
   return canInitOk;
 }
@@ -134,19 +142,45 @@ void comm_updatePeer( const uint8_t* mac, float power, uint8_t priority){
         peers.push_back(np);
     }
     portEXIT_CRITICAL(&peersMux);
+
+    // Si el nodo vuelve a aparecer, sacarlo de la lista zombie
+    for (int i = (int)zombies.size() - 1; i >= 0; --i){
+        if (memcmp(zombies[i].mac, mac, 6) == 0){
+            zombies.erase(zombies.begin() + i);
+            break;
+        }
+    }
+
     displayNeedsUpdate = true;
 }
 
 void comm_PurgeStalePeers(){
     unsigned long now = millis();
+    uint8_t removedMacs[8][6];
+    int removedCount = 0;
+
+    uint8_t removedPriorities[8];
+
     portENTER_CRITICAL(&peersMux);
     for (int i = (int)peers.size() - 1; i >= 0; --i){
         if (now - peers[i].lastSeen > 10 * WINDOW_MS){
+            if (removedCount < 8){
+                memcpy(removedMacs[removedCount], peers[i].mac, 6);
+                removedPriorities[removedCount] = peers[i].priority;
+                removedCount++;
+            }
             peers.erase(peers.begin() + i);
             displayNeedsUpdate = true;
         }
     }
     portEXIT_CRITICAL(&peersMux);
+
+    for (int i = 0; i < removedCount; i++){
+        ZombiePeer z;
+        memcpy(z.mac, removedMacs[i], 6);
+        z.priority = removedPriorities[i];
+        zombies.push_back(z);
+    }
 }
 
 float comm_GetTotalConsumption(){
@@ -188,22 +222,26 @@ PeerData comm_FindNewestPeer(){
 
 void comm_processUart(){
     unsigned long now = millis();
+
     if (now - lastUartSendMillis >= uartSendInterval) {
         lastUartSendMillis = now;
 
         // 1. Enviar VRMS y Corriente Disponible
         float current_available_uart = 0.0f;
-        if (Vrms >= V_MIN && availablePower > 0.0f && panelDataValid) {
-        current_available_uart = availablePower / Vrms;
-        }
-        // Formato: VRMS:voltaje,corriente
+        if (Vrms >= V_MIN && availablePower > 0.0f && panelDataValid)
+            current_available_uart = availablePower / Vrms;
         SerialGW.printf("VRMS:%.2f,%.3f\n", Vrms, current_available_uart);
 
         // 2. Enviar Potencia del CAN
-        // Usamos el valor de 'availablePower' global, asegurando enviar 0 si no es válido
         float power_to_send_uart = (panelDataValid && availablePower > 0.0f) ? availablePower : 0.0f;
-        // Formato: CAN_PWR:potencia
         SerialGW.printf("CAN_PWR:%.1f\n", power_to_send_uart);
+
+        // 3. Anunciar consumo=0 para nodos desaparecidos, conservando su prioridad real
+        for (auto& z : zombies){
+            char macStr[18];
+            macToStr(z.mac, macStr);
+            SerialGW.printf("PEER:%s,0.0000,%d\n", macStr, z.priority);
+        }
     }
 }
 
@@ -226,6 +264,7 @@ void comm_processEspNow(){
 // ------------------------------------------------------------
 
 void comm_processCanRx(){
+  if (!canInitOk) return;
   // ---------- PROCESAR MENSAJES CAN RECIBIDOS ----------
   if (canRxFlag) {
     // limpiar flag lo antes posible
@@ -287,7 +326,7 @@ static bool comm_resetCan() {
   canRxFlag = false;
 
   mcp2515.reset();
-  delay(10);
+  delay(50);
 
   bool ok = false;
   if (mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ) == MCP2515::ERROR_OK) {
@@ -322,8 +361,10 @@ void comm_processCanTx() {
     return;
   }
 
-  // --- Demasiados fallos consecutivos: desactivar ISR y entrar en espera ---
-  if (canConsecFailures >= CAN_RESET_THRESHOLD) {
+  // --- Demasiados fallos consecutivos O sin éxito por demasiado tiempo ---
+  bool forceReset = canConsecFailures >= CAN_RESET_THRESHOLD ||
+                    (now - lastCanSuccessMillis > CAN_FORCE_RESET_MS);
+  if (forceReset) {
     detachInterrupt(digitalPinToInterrupt(CAN_INT_PIN));
     canRxFlag           = false;
     canInitOk           = false;
@@ -349,6 +390,7 @@ void comm_processCanTx() {
       messageSent           = true;
       secondLastCanSentTime = lastCanSentTime;
       lastCanSentTime       = now;
+      lastCanSuccessMillis  = now;
       canConsecFailures     = 0;
       displayNeedsUpdate    = true;
     } else {
