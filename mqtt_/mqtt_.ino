@@ -7,12 +7,12 @@
 // ── WiFi / MQTT ──────────────────────────────────────────────────────────────
 const char* SSID        = "Wi-Fio LabEtronica";
 const char* PASS        = "wds2008fio";
-const char* MQTT_SERVER = "192.168.25.116";
+const char* MQTT_SERVER = "192.168.25.140";
 const int   MQTT_PORT   = 1883;
 
 // ── UART2: RX=GPIO5 ← TX maestro, TX=GPIO4 → RX maestro ────────────────────
-#define S3_RX_PIN 5
-#define S3_TX_PIN 4
+#define GW_RX_PIN 5
+#define GW_TX_PIN 4
 HardwareSerial SerialMaster(2);
 
 // ── Tópicos ──────────────────────────────────────────────────────────────────
@@ -52,7 +52,7 @@ void mqtt_reconnect() {
   if (mqtt.connected() || millis() - last < 5000) return;
   last = millis();
   Serial.print("MQTT...");
-  if (mqtt.connect("S3_Gateway")) Serial.println(" OK");
+  if (mqtt.connect("ESP32_Gateway")) Serial.println(" OK");
   else Serial.printf(" fallo rc=%d\n", mqtt.state());
 }
 
@@ -122,7 +122,7 @@ void parseAndPublish(const String& line) {
 // ── Setup ─────────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
-  SerialMaster.begin(115200, SERIAL_8N1, S3_RX_PIN, S3_TX_PIN);
+  SerialMaster.begin(115200, SERIAL_8N1, GW_RX_PIN, GW_TX_PIN);
   setup_wifi();
   mqtt.setServer(MQTT_SERVER, MQTT_PORT);
 }
