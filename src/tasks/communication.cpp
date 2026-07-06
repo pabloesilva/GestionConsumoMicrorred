@@ -163,7 +163,7 @@ void comm_PurgeStalePeers(){
 
     portENTER_CRITICAL(&peersMux);
     for (int i = (int)peers.size() - 1; i >= 0; --i){
-        if (now - peers[i].lastSeen > 4 * WINDOW_MS){
+        if (now - peers[i].lastSeen > 6 * WINDOW_MS){
             if (removedCount < 8){
                 memcpy(removedMacs[removedCount], peers[i].mac, 6);
                 removedPriorities[removedCount] = peers[i].priority;

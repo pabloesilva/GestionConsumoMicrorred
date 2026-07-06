@@ -1,8 +1,8 @@
-# Nodo Informante (NI)
+# Agente de Carga (AC)
 
-Firmware para ESP32 que actúa como puente entre tres sistemas de la microrred: el **bus CAN** hacia el Agente de Gestión (AG), la **red ESP-NOW** de Nodos de Consumo (NC), y un enlace **UART** hacia un Gateway externo de monitoreo/telemetría.
+Firmware para ESP32 que actúa como puente entre tres sistemas de la microrred: el **bus CAN** hacia el Agente de Generación (AG), la **red ESP-NOW** de Nodos de Consumo (NC), y un enlace **UART** hacia un Gateway externo de monitoreo/telemetría.
 
-El NI recibe por CAN la potencia instantánea del panel medida por el AG, la combina con una medición propia de tensión RMS para calcular la corriente disponible en la red, y la retransmite por ESP-NOW a los NC — cumpliendo así el rol que el README del NC describe como **Agente de Carga (AC)**. En simultáneo, escucha los broadcasts de consenso de los NC, arma una tabla de peers y reporta el consumo total agregado de vuelta al AG por CAN. Todo el tráfico (paquetes CAN, mensajes de consenso, estado de peers) se vuelca además por UART hacia un Gateway para registro/monitoreo externo. Un display OLED con 3 pantallas navegables por botones permite inspeccionar el estado del nodo sin depender del Gateway.
+El AC recibe por CAN la potencia instantánea del panel medida por el AG, la combina con una medición propia de tensión RMS para calcular la corriente disponible en la red, y la retransmite por ESP-NOW a los NC. En simultáneo, escucha los broadcasts de consenso de los NC, arma una tabla de peers y reporta el consumo total agregado de vuelta al AG por CAN. Todo el tráfico (paquetes CAN, mensajes de consenso, estado de peers) se vuelca además por UART hacia un Gateway para registro/monitoreo externo. Un display OLED con 3 pantallas navegables por botones permite inspeccionar el estado del nodo sin depender del Gateway.
 
 > Para el detalle del algoritmo de consenso, prioridades y cascada de desconexión que corren en cada NC, ver el README del repositorio del NC.
 
@@ -11,20 +11,20 @@ El NI recibe por CAN la potencia instantánea del panel medida por el AG, la com
 ## Arquitectura
 
 ```
-  Agente de Gestion (AG)                                   Gateway (monitoreo)
+  Agente de Generación (AG)                                 Gateway (monitoreo)
         |                                                        ^
         | CAN 500kbps (id 0x610: V,I panel)                      | UART 115200
         |                                                        | (VRMS / CAN_PWR / PEER)
         v                                                        |
   +----------------------------------------------------------------+
-  |                      Nodo Informante (NI)                       |
-  +----------------------------------+------------------------------+
+  |                      Agente de Carga (AC)                      |
+  +----------------------------------+-----------------------------+
                                      |
         CAN 0x620 (consumo total) <-+-> ESP-NOW broadcast
                                           - TX: availability_msg_t (corriente disponible)
                                           - RX: consensus_msg_t (consumo + prioridad) de cada NC
         (vuelve al AG)                        |
-                                               v
+                                              v
                                     Nodos de Consumo (NC) x N
 ```
 
@@ -92,11 +92,11 @@ data[0..1] = V_panel  (uint16, 0..4095 -> 0..V_MAX)
 data[2..3] = I_panel  (uint16, 0..4095 -> 0..I_MAX)
 ```
 
-El NI reconstruye ambos valores, los clampea a `[0, V_MAX]` / `[0, I_MAX]`, descarta como cero cualquier valor menor a 0.01 (ruido), y calcula `availablePower = V_panel * I_panel`. Si no llega un frame válido durante `DATA_EXPIRY_MS` (10s), `panelDataValid` pasa a `false` y el resto del sistema deja de considerar ese dato utilizable.
+El AC reconstruye ambos valores, los clampea a `[0, V_MAX]` / `[0, I_MAX]`, descarta como cero cualquier valor menor a 0.01 (ruido), y calcula `availablePower = V_panel * I_panel`. Si no llega un frame válido durante `DATA_EXPIRY_MS` (10s), `panelDataValid` pasa a `false` y el resto del sistema deja de considerar ese dato utilizable.
 
 ### Envío — consumo total de la red (id `0x620`)
 
-Cada `canInterval` (5s), el NI informa al AG el consumo total agregado de los NC activos (suma de la tabla de peers), codificado como entero de 16 bits little-endian con 2 decimales de precisión:
+Cada `canInterval` (5s), el AC informa al AG el consumo total agregado de los NC activos (suma de la tabla de peers), codificado como entero de 16 bits little-endian con 2 decimales de precisión:
 
 ```
 data[0..1] = (uint16_t)(totalConsumption * 100)
@@ -145,7 +145,7 @@ struct PeerData {
 };
 ```
 
-Un peer sin mensajes por más de `4 * WINDOW_MS` (2s) se elimina de la tabla activa (deja de sumar al consumo total y desaparece de la pantalla de nodos), y pasa a una lista de **zombies** que conserva su última prioridad conocida. Mientras esté en esa lista, el NI le informa al Gateway por UART `PEER:<mac>,0.0000,<priority>` en cada ciclo, para que el sistema de monitoreo lo vea caer a cero sin perder de vista qué prioridad tenía. Si el peer vuelve a transmitir, se lo saca de la lista de zombies.
+Un peer sin mensajes por más de `4 * WINDOW_MS` (2s) se elimina de la tabla activa (deja de sumar al consumo total y desaparece de la pantalla de nodos), y pasa a una lista de **zombies** que conserva su última prioridad conocida. Mientras esté en esa lista, el AC le informa al Gateway por UART `PEER:<mac>,0.0000,<priority>` en cada ciclo, para que el sistema de monitoreo lo vea caer a cero sin perder de vista qué prioridad tenía. Si el peer vuelve a transmitir, se lo saca de la lista de zombies.
 
 > A diferencia del NC, este mecanismo es solo para telemetría hacia el Gateway — el `power=0` de un zombie nunca se inyecta en `comm_GetTotalConsumption()` ni en el mensaje CAN 0x620.
 
@@ -153,7 +153,7 @@ Un peer sin mensajes por más de `4 * WINDOW_MS` (2s) se elimina de la tabla act
 
 ## Comunicación UART (con el Gateway)
 
-UART0 remapeada a los pines TX=1/RX=3 a 115200 baud (por eso `Serial` de debug está deshabilitado — comparte el mismo periférico físico). Cada `uartSendInterval` (500ms) el NI emite:
+UART0 remapeada a los pines TX=1/RX=3 a 115200 baud (por eso `Serial` de debug está deshabilitado — comparte el mismo periférico físico). Cada `uartSendInterval` (500ms) el AC emite:
 
 ```
 VRMS:<Vrms>,<availableCurrent>      // Vrms con 2 decimales, corriente disponible con 3
